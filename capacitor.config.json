@@ -1,0 +1,6 @@
+{
+  "appId": "com.dpi.attendance.radar",
+  "appName": "DPI Attendance Radar",
+  "webDir": "dist",
+  "bundledWebRuntime": false
+}

@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">DPI Attendance Radar</string>
+    <string name="title_activity_main">DPI Attendance Radar</string>
+    <string name="package_name">com.dpi.attendance.radar</string>
+    <string name="custom_url_scheme">com.dpi.attendance.radar</string>
+</resources>
