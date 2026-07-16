@@ -14,7 +14,10 @@ import {
   ChevronDown,
   AlertTriangle,
   Coffee,
-  BarChart3
+  BarChart3,
+  Users,
+  User,
+  Lock
 } from 'lucide-react';
 import { supabase } from './supabaseClient';
 import * as XLSX from 'xlsx';
@@ -213,6 +216,8 @@ export default function App() {
   // Authentication & Initial Splash states
   const [isAuthenticated, setIsAuthenticated] = useState(() => localStorage.getItem('dpi_authenticated') === 'true');
   const [isInitializing, setIsInitializing] = useState(true);
+  const [isLoaderFading, setIsLoaderFading] = useState(false);
+  const [isLoginFading, setIsLoginFading] = useState(false);
   const [loginUsername, setLoginUsername] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
   const [loginError, setLoginError] = useState(null);
@@ -223,6 +228,10 @@ export default function App() {
   const [logsPage, setLogsPage] = useState(1);
   const [presencePage, setPresencePage] = useState(1);
   const [selectedProfileEmpId, setSelectedProfileEmpId] = useState(null);
+  const [profileSort, setProfileSort] = useState('name'); // 'name' | 'hours' | 'status'
+  const [profileFilter, setProfileFilter] = useState('All'); // 'All' | 'IN' | 'OUT' | 'goalMet' | 'late' | 'overtime'
+  const [profileViewMode, setProfileViewMode] = useState('grid'); // 'grid' | 'table'
+  const [profileItemsPerPage, setProfileItemsPerPage] = useState(8); // 8 | 16 | 32 | 64 | 100
 
   // Advanced Export Hub State
   const [exportReportType, setExportReportType] = useState('logs'); // 'logs' | 'timesheet'
@@ -287,6 +296,9 @@ export default function App() {
   // Dropdowns UI state
   const [isDeptDropdownOpen, setIsDeptDropdownOpen] = useState(false);
   const [isAnalyticsDateDropdownOpen, setIsAnalyticsDateDropdownOpen] = useState(false);
+  const [isProfileDeptDropdownOpen, setIsProfileDeptDropdownOpen] = useState(false);
+  const [isProfileSortDropdownOpen, setIsProfileSortDropdownOpen] = useState(false);
+  const [isProfileDensityDropdownOpen, setIsProfileDensityDropdownOpen] = useState(false);
 
   // Handle closing custom dropdowns on click outside
   useEffect(() => {
@@ -308,6 +320,15 @@ export default function App() {
       }
       if (!e.target.closest('.analytics-date-dropdown-container')) {
         setIsAnalyticsDateDropdownOpen(false);
+      }
+      if (!e.target.closest('.profile-dept-dropdown-container')) {
+        setIsProfileDeptDropdownOpen(false);
+      }
+      if (!e.target.closest('.profile-sort-dropdown-container')) {
+        setIsProfileSortDropdownOpen(false);
+      }
+      if (!e.target.closest('.profile-density-dropdown-container')) {
+        setIsProfileDensityDropdownOpen(false);
       }
     };
     document.addEventListener('click', handleOutsideClick);
@@ -427,7 +448,11 @@ export default function App() {
         setIsLoadingData(false);
       }
       setTimeout(() => {
-        setIsInitializing(false);
+        setIsLoaderFading(true);
+        setTimeout(() => {
+          setIsInitializing(false);
+          setIsLoaderFading(false);
+        }, 800);
       }, 1200);
     }
   };
@@ -435,9 +460,13 @@ export default function App() {
   const handleLogin = (e) => {
     if (e) e.preventDefault();
     if (loginUsername === 'ADMIN_DPI' && loginPassword === 'fortress') {
-      setIsAuthenticated(true);
       setLoginError(null);
+      setIsAuthenticated(true);
+      setIsLoginFading(true);
       localStorage.setItem('dpi_authenticated', 'true');
+      setTimeout(() => {
+        setIsLoginFading(false);
+      }, 800);
     } else {
       setLoginError('Invalid admin credentials. Please try again.');
     }
@@ -783,6 +812,107 @@ export default function App() {
       return matchesDept && matchesSearch && matchesStatus;
     });
   }, [employees, searchQuery, statusFilter, employeePresenceMap, departmentFilter]);
+
+  // Profiles specific filter & sorting memo
+  const sortedAndFilteredProfiles = useMemo(() => {
+    let list = [...filteredEmployeesList];
+
+    if (profileFilter !== 'All') {
+      list = list.filter(([empId, emp]) => {
+        const statusData = employeePresenceMap[empId] || {
+          status: 'OUT',
+          lastPunchTime: null,
+          hoursWorkedToday: 0,
+          formattedTime: '0h 0m',
+          punchesToday: []
+        };
+        const isInside = statusData.status === 'IN';
+
+        if (profileFilter === 'IN') return isInside;
+        if (profileFilter === 'OUT') return !isInside;
+        if (profileFilter === 'goalMet') return statusData.hoursWorkedToday >= 7;
+        if (profileFilter === 'late') {
+          const punches = statusData.punchesToday || [];
+          const firstIn = punches.find(p => p.type === 'IN');
+          if (firstIn) {
+            const time = new Date(firstIn.time);
+            const hour = time.getHours();
+            const minute = time.getMinutes();
+            return (hour > 9) || (hour === 9 && minute > 15);
+          }
+          return false;
+        }
+        if (profileFilter === 'overtime') {
+          return statusData.hoursWorkedToday > 9;
+        }
+        return true;
+      });
+    }
+
+    list.sort(([idA, empA], [idB, empB]) => {
+      const statusA = employeePresenceMap[idA] || { status: 'OUT', hoursWorkedToday: 0 };
+      const statusB = employeePresenceMap[idB] || { status: 'OUT', hoursWorkedToday: 0 };
+
+      if (profileSort === 'name') {
+        return empA.name.localeCompare(empB.name);
+      }
+      if (profileSort === 'hours') {
+        return statusB.hoursWorkedToday - statusA.hoursWorkedToday;
+      }
+      if (profileSort === 'status') {
+        const valA = statusA.status === 'IN' ? 1 : 0;
+        const valB = statusB.status === 'IN' ? 1 : 0;
+        return valB - valA;
+      }
+      return 0;
+    });
+
+    return list;
+  }, [filteredEmployeesList, profileFilter, profileSort, employeePresenceMap]);
+
+  // Live Cockpit Stats for Employee Profiles Tab
+  const profileSummaryStats = useMemo(() => {
+    let present = 0;
+    let away = 0;
+    let late = 0;
+    let overtime = 0;
+
+    filteredEmployeesList.forEach(([empId, emp]) => {
+      const statusData = employeePresenceMap[empId] || {
+        status: 'OUT',
+        hoursWorkedToday: 0,
+        punchesToday: []
+      };
+
+      if (statusData.status === 'IN') {
+        present++;
+      } else {
+        away++;
+      }
+
+      if (statusData.hoursWorkedToday > 9) {
+        overtime++;
+      }
+
+      const firstIn = (statusData.punchesToday || []).find(p => p.type === 'IN');
+      if (firstIn) {
+        const time = new Date(firstIn.time);
+        const hour = time.getHours();
+        const minute = time.getMinutes();
+        if ((hour > 9) || (hour === 9 && minute > 15)) {
+          late++;
+        }
+      }
+    });
+
+    return {
+      total: filteredEmployeesList.length,
+      present,
+      away,
+      late,
+      overtime
+    };
+  }, [filteredEmployeesList, employeePresenceMap]);
 
   // ==========================================
   // 9. Advanced Analytics Calculation (useMemo)
@@ -1146,8 +1276,9 @@ export default function App() {
   }, [filteredLogs]);
 
   const totalPresencePages = useMemo(() => {
-    return Math.ceil(filteredEmployeesList.length / EMPLOYEES_PER_PAGE) || 1;
-  }, [filteredEmployeesList]);
+    const limit = profileItemsPerPage === 'All' ? sortedAndFilteredProfiles.length : profileItemsPerPage;
+    return Math.ceil(sortedAndFilteredProfiles.length / limit) || 1;
+  }, [sortedAndFilteredProfiles, profileItemsPerPage]);
 
   // Paginated content slices
   const paginatedLogs = useMemo(() => {
@@ -1156,9 +1287,10 @@ export default function App() {
   }, [filteredLogs, logsPage]);
 
   const paginatedEmployees = useMemo(() => {
-    const start = (presencePage - 1) * EMPLOYEES_PER_PAGE;
-    return filteredEmployeesList.slice(start, start + EMPLOYEES_PER_PAGE);
-  }, [filteredEmployeesList, presencePage]);
+    if (profileItemsPerPage === 'All') return sortedAndFilteredProfiles;
+    const start = (presencePage - 1) * profileItemsPerPage;
+    return sortedAndFilteredProfiles.slice(start, start + profileItemsPerPage);
+  }, [sortedAndFilteredProfiles, presencePage, profileItemsPerPage]);
 
   // ==========================================
   // 10. Hourly Peaks & Weekly Trends Analytics
@@ -1328,6 +1460,27 @@ export default function App() {
       daySummaries
     };
   }, [selectedProfileEmpId, processedLogs, currentTime]);
+
+  const heatmapDays = useMemo(() => {
+    if (!selectedEmployeeAnalytics) return [];
+    
+    const days = [];
+    const today = new Date();
+    
+    for (let i = 29; i >= 0; i--) {
+      const d = new Date(today);
+      d.setDate(today.getDate() - i);
+      
+      const targetDateStr = d.toDateString();
+      const summary = selectedEmployeeAnalytics.daySummaries.find(day => day.dateStr === targetDateStr);
+      
+      days.push({
+        date: d,
+        summary
+      });
+    }
+    return days;
+  }, [selectedEmployeeAnalytics]);
 
   // Dynamic grid lines computed outside of JSX to follow Rules of Hooks
   const hourlyGridLines = useMemo(() => {
@@ -2238,6 +2391,283 @@ const handleDownloadPDFReport = async () => {
   }
 };
 
+  const handleDownloadIndividualPDF = async () => {
+    if (!selectedProfileEmpId || !selectedEmployeeAnalytics) return;
+    
+    const emp = employees[selectedProfileEmpId] || { name: 'Employee', department: 'General' };
+    const stats = selectedEmployeeAnalytics;
+    
+    // Set colors according to selected theme or a default deep blue theme
+    const activeTheme = { primary: '#1e293b', accent: '#f8fafc', border: '#e2e8f0' };
+
+    const logoHtml = `
+      <div style="font-size: 16px; font-weight: 900; color: #1e293b; letter-spacing: 0.5px;">DPI BIOMETRIC SYSTEM</div>
+    `;
+
+    const styles = `
+      <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;900&family=JetBrains+Mono:wght@700&display=swap');
+        #pdf-report-render-target * {
+          font-family: 'Inter', -apple-system, sans-serif !important;
+          box-sizing: border-box;
+        }
+        .header {
+          padding: 20px 24px;
+          border-bottom: 2px solid ${activeTheme.primary};
+          background-color: ${activeTheme.accent};
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+        }
+        .title {
+          font-size: 18px;
+          font-weight: 900;
+          color: ${activeTheme.primary};
+          margin: 0;
+          text-transform: uppercase;
+        }
+        .meta-grid {
+          display: grid;
+          grid-template-cols: 1fr 1fr;
+          gap: 16px;
+          padding: 20px 24px;
+          background-color: #ffffff;
+        }
+        .meta-box {
+          border: 1px solid ${activeTheme.border};
+          padding: 12px;
+          border-radius: 8px;
+        }
+        .meta-label {
+          font-size: 9px;
+          font-weight: 700;
+          color: #64748b;
+          text-transform: uppercase;
+          letter-spacing: 0.5px;
+          margin-bottom: 4px;
+        }
+        .meta-value {
+          font-size: 12px;
+          font-weight: 800;
+          color: #0f172a;
+        }
+        .stats-grid {
+          display: grid;
+          grid-template-cols: repeat(4, 1fr);
+          gap: 12px;
+          padding: 0 24px 20px 24px;
+        }
+        .stat-card {
+          background-color: ${activeTheme.accent};
+          border: 1px solid ${activeTheme.border};
+          border-radius: 8px;
+          padding: 12px;
+          text-align: center;
+        }
+        .stat-num {
+          font-size: 16px;
+          font-weight: 900;
+          color: ${activeTheme.primary};
+          margin-top: 4px;
+        }
+        .section-title {
+          font-size: 11px;
+          font-weight: 800;
+          color: #475569;
+          text-transform: uppercase;
+          letter-spacing: 0.5px;
+          padding: 0 24px;
+          margin: 16px 0 8px 0;
+        }
+        table {
+          width: calc(100% - 48px);
+          margin: 0 24px 24px 24px;
+          border-collapse: collapse;
+          font-size: 10px;
+        }
+        th {
+          background-color: ${activeTheme.primary};
+          color: white;
+          font-weight: 700;
+          text-transform: uppercase;
+          font-size: 8px;
+          letter-spacing: 0.5px;
+          padding: 8px 10px;
+          text-align: left;
+        }
+        td {
+          padding: 8px 10px;
+          border-bottom: 1px solid ${activeTheme.border};
+          color: #334155;
+        }
+        tr:nth-child(even) {
+          background-color: #f8fafc;
+        }
+        .badge {
+          display: inline-block;
+          font-size: 8px;
+          font-weight: 700;
+          padding: 2px 6px;
+          border-radius: 4px;
+          text-transform: uppercase;
+        }
+        .badge-green { background-color: #dcfce7; color: #15803d; }
+        .badge-red { background-color: #fee2e2; color: #b91c1c; }
+        .badge-amber { background-color: #fef3c7; color: #b45309; }
+      </style>
+    `;
+
+    const contentHtml = `
+      <div style="background-color: white; padding-bottom: 24px;">
+        <div class="header">
+          <div>
+            ${logoHtml}
+            <h1 class="title" style="margin-top: 4px;">Individual Performance Report</h1>
+          </div>
+          <div style="text-align: right;">
+            <div style="font-size: 9px; font-weight: 600; color: #64748b;">Report Generated</div>
+            <div style="font-size: 11px; font-weight: 800; color: #0f172a; margin-top: 2px;">${new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })}</div>
+          </div>
+        </div>
+
+        <div class="meta-grid">
+          <div class="meta-box">
+            <div class="meta-label">Employee Details</div>
+            <div class="meta-value">${emp.name}</div>
+            <div style="font-size: 9px; color: #64748b; margin-top: 2px;">ID: ${selectedProfileEmpId}</div>
+          </div>
+          <div class="meta-box">
+            <div class="meta-label">Department</div>
+            <div class="meta-value">${emp.department}</div>
+            <div style="font-size: 9px; color: #64748b; margin-top: 2px;">Role: Staff Member</div>
+          </div>
+        </div>
+
+        <div class="section-title">Performance Summary</div>
+        <div class="stats-grid">
+          <div class="stat-card">
+            <div class="meta-label">Goal Compliance</div>
+            <div class="stat-num">${Math.round(stats.goalComplianceRate)}%</div>
+          </div>
+          <div class="stat-card">
+            <div class="meta-label">On-Time Arrival</div>
+            <div class="stat-num">${Math.round(stats.punctualityRate)}%</div>
+          </div>
+          <div class="stat-card">
+            <div class="meta-label">Avg Daily Hours</div>
+            <div class="stat-num">${Math.floor(stats.avgWorkHours)}h ${Math.round((stats.avgWorkHours % 1) * 60)}m</div>
+          </div>
+          <div class="stat-card">
+            <div class="meta-label">Days Present</div>
+            <div class="stat-num">${stats.daysPresentCount} Days</div>
+          </div>
+        </div>
+
+        <div class="section-title">Daily Attendance Logs</div>
+        <table>
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>First In</th>
+              <th>Last Out</th>
+              <th>Work Hours</th>
+              <th>Break Hours</th>
+              <th>Compliance</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${stats.daySummaries.map(day => `
+              <tr>
+                <td style="font-weight: 700; color: #0f172a;">${day.dateStr}</td>
+                <td style="font-family: 'JetBrains Mono', monospace !important;">${day.firstIn}</td>
+                <td style="font-family: 'JetBrains Mono', monospace !important;">${day.lastOut}</td>
+                <td style="font-weight: 600;">${Math.floor(day.hoursWorked)}h ${Math.round((day.hoursWorked % 1) * 60)}m</td>
+                <td>${Math.floor(day.breakHours)}h ${Math.round((day.breakHours % 1) * 60)}m</td>
+                <td>
+                  <span class="badge ${day.isGoalMet ? 'badge-green' : 'badge-red'}">
+                    ${day.isGoalMet ? 'Goal Met' : 'Short Hrs'}
+                  </span>
+                  ${!day.isOnTime ? `
+                    <span class="badge badge-amber" style="margin-left: 4px;">
+                      Late
+                    </span>
+                  ` : ''}
+                </td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+
+    // Set HTML content to state to render in the hidden container
+    setPdfReportHtml(`${styles}<div>${contentHtml}</div>`);
+    
+    // Trigger the canvas compiler in next tick
+    setTimeout(async () => {
+      try {
+        const element = document.getElementById('pdf-report-render-target');
+        if (!element) {
+          console.error('Render target element not found');
+          return;
+        }
+
+        setIsGeneratingPDF(true);
+
+        const canvas = await html2canvas(element, {
+          scale: 2,
+          useCORS: true,
+          logging: false,
+          backgroundColor: '#ffffff'
+        });
+
+        const imgData = canvas.toDataURL('image/jpeg', 0.95);
+        const pdf = new jsPDF('p', 'mm', 'a4');
+        const pdfWidth = pdf.internal.pageSize.getWidth();
+        const pdfHeight = pdf.internal.pageSize.getHeight();
+
+        const pageCanvasHeight = (canvas.width * pdfHeight) / pdfWidth;
+        let heightLeft = canvas.height;
+        let sY = 0;
+        let isFirstPage = true;
+
+        while (heightLeft > 0) {
+          if (!isFirstPage) {
+            pdf.addPage();
+          }
+          isFirstPage = false;
+
+          const pageCanvas = document.createElement('canvas');
+          pageCanvas.width = canvas.width;
+          pageCanvas.height = Math.min(pageCanvasHeight, heightLeft);
+
+          const ctx = pageCanvas.getContext('2d');
+          ctx.drawImage(
+            canvas,
+            0, sY, canvas.width, pageCanvas.height,
+            0, 0, pageCanvas.width, pageCanvas.height
+          );
+
+          const pageImgData = pageCanvas.toDataURL('image/jpeg', 0.95);
+          const currentPdfPageHeight = (pageCanvas.height * pdfWidth) / canvas.width;
+
+          pdf.addImage(pageImgData, 'JPEG', 0, 0, pdfWidth, currentPdfPageHeight);
+
+          sY += pageCanvasHeight;
+          heightLeft -= pageCanvasHeight;
+        }
+
+        const fileName = `employee_profile_${emp.name.replace(/[^a-z0-9]/gi, '_').toLowerCase()}_${selectedProfileEmpId}.pdf`;
+        pdf.save(fileName);
+      } catch (canvasErr) {
+        console.error('Error compiling PDF canvas:', canvasErr);
+      } finally {
+        setIsGeneratingPDF(false);
+        setPdfReportHtml(null);
+      }
+    }, 600);
+  };
+
   // Formatting utilities
   const formatTimeStr = (isoString) => {
     const d = parseDBDate(isoString);
@@ -2267,112 +2697,15 @@ const handleDownloadPDFReport = async () => {
     });
   };
 
-  if (isInitializing) {
-    return (
-      <div className="min-h-screen bg-slate-900 flex flex-col items-center justify-center p-4">
-        <div className="flex flex-col items-center max-w-sm text-center space-y-6 animate-in fade-in duration-700">
-          <div className="relative">
-            {/* Outer spinning ring */}
-            <div className="h-20 w-20 rounded-full border-4 border-slate-800 border-t-blue-500 animate-spin"></div>
-            {/* Inner pulsing icon */}
-            <div className="absolute inset-0 flex items-center justify-center">
-              <Fingerprint className="h-8 w-8 text-blue-500 animate-pulse" />
-            </div>
-          </div>
-          <div className="space-y-2">
-            <h2 className="text-white font-extrabold text-xl tracking-tight">DPI Biometric Attendance</h2>
-            <p className="text-slate-400 text-xs font-semibold uppercase tracking-widest animate-pulse">
-              Initializing Secure Connection...
-            </p>
-          </div>
-          <div className="w-48 bg-slate-800 h-1.5 rounded-full overflow-hidden">
-            <div className="bg-blue-500 h-full w-full rounded-full animate-pulse"></div>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  if (!isAuthenticated) {
-    return (
-      <div className="min-h-screen bg-slate-900 flex flex-col justify-center py-12 sm:px-6 lg:px-8">
-        <div className="sm:mx-auto sm:w-full sm:max-w-md flex flex-col items-center">
-          <div className="bg-white p-2 rounded-2xl shadow-xl mb-4 border border-slate-700 w-16 h-16 flex items-center justify-center shrink-0 animate-bounce">
-            <img src="/dpi.png" alt="DPI Logo" className="h-12 w-12 object-contain" />
-          </div>
-          <h2 className="text-center text-2xl font-black tracking-tight text-white">
-            Sign in to DPI Attendance
-          </h2>
-          <p className="mt-1 text-center text-xs text-slate-400 font-medium">
-            Enter administrative credentials to access the radar dashboard
-          </p>
-        </div>
-
-        <div className="mt-8 sm:mx-auto sm:w-full sm:max-w-md">
-          <div className="bg-slate-800 border border-slate-700 shadow-2xl rounded-2xl p-6 sm:p-10 space-y-6">
-            {loginError && (
-              <div className="bg-rose-500/10 border border-rose-500/25 text-rose-350 p-3 rounded-lg text-xs font-bold flex items-center gap-2">
-                <AlertTriangle className="h-4 w-4 shrink-0" />
-                <span>{loginError}</span>
-              </div>
-            )}
-
-            <form className="space-y-5" onSubmit={handleLogin}>
-              <div>
-                <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1.5">
-                  Username
-                </label>
-                <div className="relative">
-                  <input
-                    type="text"
-                    required
-                    value={loginUsername}
-                    onChange={(e) => setLoginUsername(e.target.value)}
-                    placeholder="Enter username"
-                    className="w-full bg-slate-850 border border-slate-700 rounded-xl px-3.5 py-2.5 text-xs font-semibold text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-all font-mono"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1.5">
-                  Password
-                </label>
-                <div className="relative">
-                  <input
-                    type="password"
-                    required
-                    value={loginPassword}
-                    onChange={(e) => setLoginPassword(e.target.value)}
-                    placeholder="••••••••"
-                    className="w-full bg-slate-850 border border-slate-700 rounded-xl px-3.5 py-2.5 text-xs font-semibold text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-all font-mono"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <button
-                  type="submit"
-                  className="w-full flex justify-center py-2.5 px-4 border border-transparent rounded-xl shadow-md text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition-colors cursor-pointer"
-                >
-                  Sign In
-                </button>
-              </div>
-            </form>
-
-            <div className="text-center pt-2 border-t border-slate-700/80">
-              <p className="text-[9px] font-bold uppercase tracking-wider text-slate-500">
-                Secured Dashboard System
-              </p>
-            </div>
-          </div>
-        </div>
-      </div>
-    );
-  }
+  // Helper condition variables
+  const showLoader = isInitializing || isLoaderFading;
+  const showLogin = !isAuthenticated || isLoginFading;
 
   return (
-    <div className="min-h-screen bg-slate-50 font-sans antialiased text-slate-800 flex flex-col">
+    <div className="relative min-h-screen bg-slate-50 font-sans antialiased text-slate-800 flex flex-col overflow-x-hidden">
+      {/* Dashboard Section */}
+      {isAuthenticated && (
+        <div className="flex-1 flex flex-col animate-fadeIn">
       {/* Header Section */}
       <header className="bg-white border-b border-slate-200 sticky top-0 z-50 shadow-sm">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 sm:gap-4">
@@ -2493,7 +2826,7 @@ const handleDownloadPDFReport = async () => {
                     : 'border-transparent text-slate-500 hover:text-slate-700'
                 }`}
               >
-                👥 Presence & Shift Board
+                👥 Employee Profiles
               </button>
               <button 
                 onClick={() => setActiveTab('analytics')}
@@ -2525,8 +2858,8 @@ const handleDownloadPDFReport = async () => {
             </div>
           </div>
 
-          {/* Filter Bar (Shown on Logs, Presence, and Analytics tabs) */}
-          {activeTab !== 'export' && (
+          {/* Filter Bar (Shown on Logs and Analytics tabs, hidden on Presence/Export) */}
+          {activeTab !== 'export' && activeTab !== 'presence' && (
             <div className="flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3 w-full animate-fadeIn">
               
               {/* Left Side: Search Bar */}
@@ -3554,6 +3887,684 @@ const handleDownloadPDFReport = async () => {
               </div>
             </div>
           </div>
+        ) : activeTab === 'presence' ? (
+          /* Full Width Employee Profiles Hub Workspace */
+          <div className="space-y-6 animate-fadeIn">
+            {/* 1. Cockpit Stats Panel */}
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+              {/* Card 1: Total Directory */}
+              <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm flex items-center justify-between border-l-4 border-l-blue-600 hover:shadow-md transition-all">
+                <div className="space-y-1">
+                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Directory Scope</p>
+                  <p className="text-xl font-black text-slate-900 font-sans">{profileSummaryStats.total}</p>
+                </div>
+                <div className="p-2 bg-blue-50 rounded-xl">
+                  <Users className="h-5 w-5 text-blue-600" />
+                </div>
+              </div>
+
+              {/* Card 2: Present */}
+              <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm flex items-center justify-between border-l-4 border-l-emerald-500 hover:shadow-md transition-all">
+                <div className="space-y-1">
+                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Present (IN)</p>
+                  <div className="flex items-center gap-1.5">
+                    <p className="text-xl font-black text-slate-900 font-sans">{profileSummaryStats.present}</p>
+                    <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                  </div>
+                </div>
+                <div className="p-2 bg-emerald-50 rounded-xl">
+                  <Clock className="h-5 w-5 text-emerald-600" />
+                </div>
+              </div>
+
+              {/* Card 3: Away */}
+              <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm flex items-center justify-between border-l-4 border-l-slate-400 hover:shadow-md transition-all">
+                <div className="space-y-1">
+                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Away (OUT)</p>
+                  <p className="text-xl font-black text-slate-900 font-sans">{profileSummaryStats.away}</p>
+                </div>
+                <div className="p-2 bg-slate-50 rounded-xl">
+                  <UserX className="h-5 w-5 text-slate-655" />
+                </div>
+              </div>
+
+              {/* Card 4: Late Today */}
+              <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm flex items-center justify-between border-l-4 border-l-amber-500 hover:shadow-md transition-all">
+                <div className="space-y-1">
+                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Late Arrival</p>
+                  <p className="text-xl font-black text-slate-900 font-sans">{profileSummaryStats.late}</p>
+                </div>
+                <div className="p-2 bg-amber-50 rounded-xl">
+                  <AlertCircle className="h-5 w-5 text-amber-600" />
+                </div>
+              </div>
+
+              {/* Card 5: Overtime */}
+              <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm flex items-center justify-between border-l-4 border-l-rose-500 hover:shadow-md transition-all">
+                <div className="space-y-1">
+                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Overtime (&gt;9h)</p>
+                  <p className="text-xl font-black text-slate-900 font-sans">{profileSummaryStats.overtime}</p>
+                </div>
+                <div className="p-2 bg-rose-50 rounded-xl">
+                  <BarChart3 className="h-5 w-5 text-rose-600" />
+                </div>
+              </div>
+            </div>
+
+            {/* 2. Main Workspace Container */}
+            <div className="bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden flex flex-col">
+              {/* Content Header */}
+              <div className="p-5 border-b border-slate-200 bg-slate-50/50 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                <div className="space-y-1">
+                  <h2 className="text-xs font-bold text-slate-900 uppercase tracking-wider font-sans flex items-center gap-2">
+                    <Users className="h-4 w-4 text-blue-600" />
+                    Staff Directory & Presence Analytics
+                  </h2>
+                  <p className="text-[10px] text-slate-500 font-medium">
+                    Real-time status tracking, daily hour goals, and timeline sparklines
+                  </p>
+                </div>
+                <div className="flex items-center gap-2 self-start md:self-auto">
+                  <span className="text-[10px] font-bold text-slate-500 font-mono bg-slate-100 px-2.5 py-1 rounded-lg border border-slate-200">
+                    Showing {sortedAndFilteredProfiles.length} of {filteredEmployeesList.length} filtered profiles
+                  </span>
+                </div>
+              </div>
+
+              {/* Enhanced Control Bar Row */}
+              <div className="bg-slate-50/30 px-5 py-4 border-b border-slate-200 flex flex-col lg:flex-row gap-4 items-center justify-between">
+                {/* Search & Dept inline filters */}
+                <div className="flex flex-col sm:flex-row items-center gap-3 w-full lg:w-auto flex-1">
+                  {/* Local Quick Search */}
+                  <div className="relative w-full sm:max-w-xs">
+                    <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-slate-400" />
+                    <input
+                      type="text"
+                      placeholder="Quick search name/ID..."
+                      value={searchQuery}
+                      onChange={(e) => { setSearchQuery(e.target.value); setPresencePage(1); }}
+                      className="w-full pl-9 pr-4 py-1.5 bg-white border border-slate-200 text-xs font-semibold text-slate-800 rounded-xl focus:outline-none focus:ring-1 focus:ring-blue-500 shadow-sm"
+                    />
+                  </div>
+
+                  {/* Local Dept Filter Custom Dropdown */}
+                  <div className="relative w-full sm:w-44 profile-dept-dropdown-container">
+                    <button
+                      type="button"
+                      onClick={() => setIsProfileDeptDropdownOpen(!isProfileDeptDropdownOpen)}
+                      className="w-full px-3 py-1.5 border border-slate-200 rounded-xl text-xs font-bold bg-white text-slate-705 outline-none cursor-pointer flex items-center justify-between shadow-sm hover:border-slate-300 transition-all text-left"
+                    >
+                      <span className="truncate">
+                        {departmentFilter === 'All' ? 'All Departments' : departmentFilter}
+                      </span>
+                      <ChevronDown className="h-3.5 w-3.5 text-slate-400 flex-shrink-0 ml-1.5" />
+                    </button>
+
+                    {isProfileDeptDropdownOpen && (
+                      <div className="absolute left-0 mt-1 bg-white border border-slate-200 rounded-xl shadow-lg z-30 p-1.5 min-w-[170px] w-full animate-fadeIn space-y-0.5">
+                        {[
+                          { value: 'All', label: 'All Departments' },
+                          { value: 'Engineering', label: 'Engineering' },
+                          { value: 'Operations', label: 'Operations' },
+                          { value: 'Marketing', label: 'Marketing' },
+                          { value: 'HR', label: 'Human Resources' },
+                          { value: 'Sales', label: 'Sales' }
+                        ].map((item) => (
+                          <button
+                            key={item.value}
+                            type="button"
+                            onClick={() => {
+                              setDepartmentFilter(item.value);
+                              setPresencePage(1);
+                              setIsProfileDeptDropdownOpen(false);
+                            }}
+                            className={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs flex justify-between items-center transition-colors cursor-pointer hover:bg-slate-50 ${
+                              departmentFilter === item.value 
+                                ? 'bg-blue-50/70 text-blue-750 font-bold' 
+                                : 'text-slate-700'
+                            }`}
+                          >
+                            <span className="truncate">{item.label}</span>
+                            {departmentFilter === item.value && (
+                              <Check className="h-3.5 w-3.5 text-blue-600 flex-shrink-0" />
+                            )}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Presence Status Quick Buttons */}
+                  <div className="flex flex-wrap items-center gap-1.5 w-full sm:w-auto">
+                    {[
+                      { value: 'All', label: 'All Status' },
+                      { value: 'IN', label: 'Present' },
+                      { value: 'OUT', label: 'Away' },
+                      { value: 'late', label: 'Late' },
+                      { value: 'overtime', label: 'Overtime' }
+                    ].map(opt => (
+                      <button
+                        key={opt.value}
+                        onClick={() => { setProfileFilter(opt.value); setPresencePage(1); }}
+                        className={`px-2.5 py-1 text-[10px] font-bold rounded-lg border transition-all cursor-pointer ${
+                          profileFilter === opt.value
+                            ? 'bg-blue-600 border-blue-600 text-white shadow-sm'
+                            : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Sort, View Toggle, Density options */}
+                <div className="flex flex-wrap items-center gap-3 w-full lg:w-auto justify-end border-t lg:border-t-0 pt-3 lg:pt-0 border-slate-100">
+                  {/* Sorting Custom Dropdown */}
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Sort:</span>
+                    <div className="relative w-36 profile-sort-dropdown-container">
+                      <button
+                        type="button"
+                        onClick={() => setIsProfileSortDropdownOpen(!isProfileSortDropdownOpen)}
+                        className="w-full px-3 py-1.5 border border-slate-200 rounded-xl text-xs font-bold bg-white text-slate-705 outline-none cursor-pointer flex items-center justify-between shadow-sm hover:border-slate-300 transition-all text-left"
+                      >
+                        <span className="truncate">
+                          {profileSort === 'name' && 'Name (A-Z)'}
+                          {profileSort === 'hours' && 'Hours Worked'}
+                          {profileSort === 'status' && 'Presence Status'}
+                        </span>
+                        <ChevronDown className="h-3.5 w-3.5 text-slate-400 flex-shrink-0 ml-1.5" />
+                      </button>
+
+                      {isProfileSortDropdownOpen && (
+                        <div className="absolute right-0 mt-1 bg-white border border-slate-200 rounded-xl shadow-lg z-30 p-1.5 min-w-[140px] w-full animate-fadeIn space-y-0.5">
+                          {[
+                            { value: 'name', label: 'Name (A-Z)' },
+                            { value: 'hours', label: 'Hours Worked' },
+                            { value: 'status', label: 'Presence Status' }
+                          ].map((item) => (
+                            <button
+                              key={item.value}
+                              type="button"
+                              onClick={() => {
+                                setProfileSort(item.value);
+                                setPresencePage(1);
+                                setIsProfileSortDropdownOpen(false);
+                              }}
+                              className={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs flex justify-between items-center transition-colors cursor-pointer hover:bg-slate-50 ${
+                                profileSort === item.value 
+                                  ? 'bg-blue-50/70 text-blue-750 font-bold' 
+                                  : 'text-slate-700'
+                              }`}
+                            >
+                              <span className="truncate">{item.label}</span>
+                              {profileSort === item.value && (
+                                <Check className="h-3.5 w-3.5 text-blue-600 flex-shrink-0" />
+                              )}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Density Custom Dropdown */}
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Density:</span>
+                    <div className="relative w-28 profile-density-dropdown-container">
+                      <button
+                        type="button"
+                        onClick={() => setIsProfileDensityDropdownOpen(!isProfileDensityDropdownOpen)}
+                        className="w-full px-3 py-1.5 border border-slate-200 rounded-xl text-xs font-bold bg-white text-slate-705 outline-none cursor-pointer flex items-center justify-between shadow-sm hover:border-slate-300 transition-all text-left"
+                      >
+                        <span className="truncate">
+                          {profileItemsPerPage === 'All' ? 'Show All' : `${profileItemsPerPage} / Page`}
+                        </span>
+                        <ChevronDown className="h-3.5 w-3.5 text-slate-400 flex-shrink-0 ml-1.5" />
+                      </button>
+
+                      {isProfileDensityDropdownOpen && (
+                        <div className="absolute right-0 mt-1 bg-white border border-slate-200 rounded-xl shadow-lg z-30 p-1.5 min-w-[110px] w-full animate-fadeIn space-y-0.5">
+                          {[
+                            { value: '8', label: '8 / Page' },
+                            { value: '16', label: '16 / Page' },
+                            { value: '32', label: '32 / Page' },
+                            { value: '64', label: '64 / Page' },
+                            { value: 'All', label: 'Show All' }
+                          ].map((item) => (
+                            <button
+                              key={item.value}
+                              type="button"
+                              onClick={() => {
+                                setProfileItemsPerPage(item.value === 'All' ? 'All' : Number(item.value));
+                                setPresencePage(1);
+                                setIsProfileDensityDropdownOpen(false);
+                              }}
+                              className={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs flex justify-between items-center transition-colors cursor-pointer hover:bg-slate-50 ${
+                                String(profileItemsPerPage) === item.value 
+                                  ? 'bg-blue-50/70 text-blue-750 font-bold' 
+                                  : 'text-slate-700'
+                              }`}
+                            >
+                              <span className="truncate">{item.label}</span>
+                              {String(profileItemsPerPage) === item.value && (
+                                <Check className="h-3.5 w-3.5 text-blue-600 flex-shrink-0" />
+                              )}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Grid / List View Toggle */}
+                  <div className="flex border border-slate-200 rounded-xl overflow-hidden shadow-sm bg-white">
+                    <button
+                      onClick={() => setProfileViewMode('grid')}
+                      className={`p-2 transition-colors cursor-pointer ${
+                        profileViewMode === 'grid' 
+                          ? 'bg-blue-600 text-white' 
+                          : 'text-slate-500 hover:bg-slate-100'
+                      }`}
+                      title="Card Grid View"
+                    >
+                      <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.2} d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
+                      </svg>
+                    </button>
+                    <button
+                      onClick={() => setProfileViewMode('table')}
+                      className={`p-2 transition-colors cursor-pointer ${
+                        profileViewMode === 'table' 
+                          ? 'bg-blue-600 text-white' 
+                          : 'text-slate-500 hover:bg-slate-100'
+                      }`}
+                      title="Compact Table List View"
+                    >
+                      <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.2} d="M4 6h16M4 12h16M4 18h16" />
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="p-5">
+                {paginatedEmployees.length > 0 ? (
+                  <>
+                    {/* Render GRID VIEW */}
+                    {profileViewMode === 'grid' ? (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 mb-4">
+                        {paginatedEmployees.map(([empId, emp]) => {
+                          const statusData = employeePresenceMap[empId] || {
+                            status: 'OUT',
+                            lastPunchTime: null,
+                            hoursWorkedToday: 0,
+                            formattedTime: '0h 0m',
+                            punchesToday: []
+                          };
+                          
+                          const isInside = statusData.status === 'IN';
+                          const shiftHoursGoal = 8;
+                          const segments = getTimelineSegments(statusData.punchesToday, currentTime);
+
+                          const punches = statusData.punchesToday || [];
+                          const firstIn = punches.find(p => p.type === 'IN');
+                          let isLate = false;
+                          if (firstIn) {
+                            const time = new Date(firstIn.time);
+                            isLate = (time.getHours() > 9) || (time.getHours() === 9 && time.getMinutes() > 15);
+                          }
+                          const isOvertime = statusData.hoursWorkedToday > 9;
+
+                          return (
+                            <div 
+                              key={empId} 
+                              className="bg-white border border-slate-200 rounded-xl p-4 shadow-sm flex flex-col justify-between hover:border-slate-305 hover:shadow-md transition-all duration-200"
+                            >
+                              {/* Identity Header */}
+                              <div className="flex items-start justify-between gap-3">
+                                <div className="flex-1">
+                                  <div className="flex items-center gap-1.5">
+                                    <h4 className="text-xs font-bold text-slate-900 truncate max-w-[120px]" title={emp.name}>{emp.name}</h4>
+                                    <button
+                                      onClick={() => setSelectedProfileEmpId(empId)}
+                                      className="text-slate-400 hover:text-slate-655 transition-colors p-0.5 rounded hover:bg-slate-105 cursor-pointer"
+                                      title="View Detailed Profile & Analytics"
+                                    >
+                                      <BarChart3 className="h-3.5 w-3.5 text-blue-600" />
+                                    </button>
+                                  </div>
+                                  <p className="text-[9px] font-mono text-slate-400 font-bold mt-0.5">{empId}</p>
+                                </div>
+                                
+                                <div className="flex flex-col items-end gap-1">
+                                  {isInside ? (
+                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[9px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-505 animate-pulse"></span>
+                                      IN
+                                    </span>
+                                  ) : (
+                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[9px] font-bold bg-slate-100 text-slate-500 border border-slate-250">
+                                      <span className="h-1.5 w-1.5 rounded-full bg-slate-400"></span>
+                                      OUT
+                                    </span>
+                                  )}
+                                  {isOvertime && (
+                                    <span className="inline-flex items-center gap-0.5 px-1 py-0.5 rounded bg-rose-50 text-rose-700 border border-rose-100 text-[8px] font-bold uppercase shadow-sm">
+                                      ⚠️ Overtime
+                                    </span>
+                                  )}
+                                  {isLate && (
+                                    <span className="inline-flex items-center gap-0.5 px-1 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-100 text-[8px] font-bold uppercase shadow-sm">
+                                      ⏱️ Late
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+
+                              {/* Hours worked progress */}
+                              <div className="mt-4 space-y-2.5">
+                                <div className="flex items-center justify-between text-[10px] border-b border-slate-50 pb-1.5">
+                                  <span className="text-slate-455 font-medium">Last Punch:</span>
+                                  <span className="font-mono text-slate-705 font-bold truncate max-w-[130px]" title={statusData.lastPunchTime ? `${statusData.status} at ${new Date(statusData.lastPunchTime).toLocaleTimeString('en-IN')}` : ''}>
+                                    {statusData.lastPunchTime ? (
+                                      `${statusData.status} at ${new Date(statusData.lastPunchTime).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true })}`
+                                    ) : (
+                                      "No logs today"
+                                    )}
+                                  </span>
+                                </div>
+
+                                <div className="grid grid-cols-3 gap-2 bg-slate-50/50 p-2.5 rounded-xl border border-slate-150">
+                                  <div>
+                                    <p className="text-[8px] font-bold text-slate-400 uppercase tracking-wider">Active</p>
+                                    <p className="text-xs font-black text-slate-800 font-mono mt-0.5">
+                                      {statusData.formattedTime}
+                                    </p>
+                                  </div>
+                                  <div>
+                                    <p className="text-[8px] font-bold text-slate-450 uppercase tracking-wider">Break</p>
+                                    <p className="text-xs font-black text-amber-600 font-mono mt-0.5">
+                                      {statusData.formattedBreakTime || '0h 0m'}
+                                    </p>
+                                  </div>
+                                  <div className="text-right">
+                                    <p className="text-[8px] font-bold text-slate-400 uppercase tracking-wider">Goal</p>
+                                    <p className="text-xs font-black text-slate-500 font-mono mt-0.5">
+                                      {shiftHoursGoal}h
+                                    </p>
+                                  </div>
+                                </div>
+
+                                {/* Shift Timeline Sparkline */}
+                                <div className="space-y-1.5">
+                                  <div className="flex justify-between text-[8px] font-bold text-slate-400">
+                                    <span>Timeline Sparkline</span>
+                                    <span className="font-mono">8 AM - 8 PM</span>
+                                  </div>
+                                  <div className="w-full h-3 rounded-lg overflow-hidden border border-slate-150 flex bg-slate-100/60 shadow-inner">
+                                    {segments.length > 0 ? (
+                                      segments.map((seg, sIdx) => {
+                                        let colorClass = 'bg-slate-100'; // away
+                                        let tooltipText = '';
+                                        const startStr = seg.start.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true });
+                                        const endStr = seg.end.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true });
+
+                                        if (seg.type === 'active') {
+                                          colorClass = 'bg-emerald-500 hover:bg-emerald-600';
+                                          tooltipText = `Active: ${startStr} - ${endStr}`;
+                                        } else if (seg.type === 'break') {
+                                          colorClass = 'bg-amber-500 hover:bg-amber-600';
+                                          tooltipText = `Break: ${startStr} - ${endStr}`;
+                                        } else {
+                                          colorClass = 'bg-slate-200/50 hover:bg-slate-200';
+                                          tooltipText = `Away: ${startStr} - ${endStr}`;
+                                        }
+
+                                        return (
+                                          <div
+                                            key={sIdx}
+                                            className={`${colorClass} h-full transition-all duration-150 cursor-help`}
+                                            style={{ width: `${seg.width}%` }}
+                                            title={tooltipText}
+                                          />
+                                        );
+                                      })
+                                    ) : (
+                                      <div className="w-full h-full bg-slate-100 flex items-center justify-center text-[7px] font-bold text-slate-405">
+                                        NO RECORD
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      /* Render TABLE VIEW */
+                      <div className="border border-slate-200 rounded-xl overflow-hidden shadow-sm bg-white mb-4">
+                        <div className="overflow-x-auto">
+                          <table className="w-full border-collapse text-left text-xs text-slate-500">
+                            <thead className="bg-slate-50 text-[10px] font-bold uppercase text-slate-400 tracking-wider border-b border-slate-200">
+                              <tr>
+                                <th className="px-5 py-3">Employee</th>
+                                <th className="px-5 py-3">Status</th>
+                                <th className="px-5 py-3">Department</th>
+                                <th className="px-5 py-3">First In</th>
+                                <th className="px-5 py-3">Last Out</th>
+                                <th className="px-5 py-3">Active Hours</th>
+                                <th className="px-5 py-3">Break Hours</th>
+                                <th className="px-5 py-3" style={{ width: '150px' }}>Timeline</th>
+                                <th className="px-5 py-3">Alerts</th>
+                                <th className="px-5 py-3 text-right">Actions</th>
+                              </tr>
+                            </thead>
+                            <tbody className="bg-white divide-y divide-slate-100">
+                              {paginatedEmployees.map(([empId, emp]) => {
+                                const statusData = employeePresenceMap[empId] || {
+                                  status: 'OUT',
+                                  lastPunchTime: null,
+                                  hoursWorkedToday: 0,
+                                  formattedTime: '0h 0m',
+                                  punchesToday: []
+                                };
+                                
+                                const isInside = statusData.status === 'IN';
+                                const shiftHoursGoal = 8;
+                                const segments = getTimelineSegments(statusData.punchesToday, currentTime);
+
+                                const punches = statusData.punchesToday || [];
+                                const firstIn = punches.find(p => p.type === 'IN');
+                                const lastOut = punches.length > 0 ? punches[punches.length - 1] : null;
+
+                                let isLate = false;
+                                let firstInStr = '--:--';
+                                if (firstIn) {
+                                  const time = new Date(firstIn.time);
+                                  firstInStr = time.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true });
+                                  isLate = (time.getHours() > 9) || (time.getHours() === 9 && time.getMinutes() > 15);
+                                }
+
+                                let lastOutStr = '--:--';
+                                if (lastOut && lastOut.type === 'OUT') {
+                                  const time = new Date(lastOut.time);
+                                  lastOutStr = time.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true });
+                                }
+
+                                const isOvertime = statusData.hoursWorkedToday > 9;
+
+                                return (
+                                  <tr key={empId} className="hover:bg-slate-50/50 transition-colors">
+                                    <td className="px-5 py-3.5 whitespace-nowrap">
+                                      <div className="flex items-center gap-3">
+                                        <div className="h-8 w-8 rounded-full bg-slate-100 border border-slate-200 flex items-center justify-center font-bold text-xs text-slate-600 shadow-inner">
+                                          {emp.name.split(' ').map(n => n[0]).join('')}
+                                        </div>
+                                        <div>
+                                          <div className="text-xs font-bold text-slate-900">{emp.name}</div>
+                                          <div className="text-[10px] text-slate-400 font-mono font-medium">{empId}</div>
+                                        </div>
+                                      </div>
+                                    </td>
+                                    <td className="px-5 py-3.5 whitespace-nowrap">
+                                      {isInside ? (
+                                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-250">
+                                          <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                                          IN
+                                        </span>
+                                      ) : (
+                                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-500 border border-slate-200">
+                                          <span className="h-1.5 w-1.5 rounded-full bg-slate-400"></span>
+                                          OUT
+                                        </span>
+                                      )}
+                                    </td>
+                                    <td className="px-5 py-3.5 whitespace-nowrap">
+                                      <span className="px-2 py-0.5 bg-slate-50 border border-slate-200 rounded-md text-[10px] font-bold text-slate-600">
+                                        {emp.department}
+                                      </span>
+                                    </td>
+                                    <td className="px-5 py-3.5 whitespace-nowrap font-mono text-[10px] text-slate-650">
+                                      {firstInStr}
+                                    </td>
+                                    <td className="px-5 py-3.5 whitespace-nowrap font-mono text-[10px] text-slate-650">
+                                      {lastOutStr}
+                                    </td>
+                                    <td className="px-5 py-3.5 whitespace-nowrap">
+                                      <span className="font-mono text-xs font-bold text-slate-800">
+                                        {statusData.formattedTime}
+                                      </span>
+                                    </td>
+                                    <td className="px-5 py-3.5 whitespace-nowrap font-mono text-xs text-amber-600">
+                                      {statusData.formattedBreakTime || '0h 0m'}
+                                    </td>
+                                    <td className="px-5 py-3.5 whitespace-nowrap">
+                                      <div className="w-28 h-3 rounded overflow-hidden border border-slate-150 flex bg-slate-100 shadow-inner">
+                                        {segments.length > 0 ? (
+                                          segments.map((seg, sIdx) => {
+                                            let colorClass = 'bg-slate-100';
+                                            let tooltipText = '';
+                                            const startStr = seg.start.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true });
+                                            const endStr = seg.end.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true });
+
+                                            if (seg.type === 'active') {
+                                              colorClass = 'bg-emerald-500 hover:bg-emerald-600';
+                                              tooltipText = `Active: ${startStr} - ${endStr}`;
+                                            } else if (seg.type === 'break') {
+                                              colorClass = 'bg-amber-500 hover:bg-amber-600';
+                                              tooltipText = `Break: ${startStr} - ${endStr}`;
+                                            } else {
+                                              colorClass = 'bg-slate-200/50 hover:bg-slate-200';
+                                              tooltipText = `Away: ${startStr} - ${endStr}`;
+                                            }
+
+                                            return (
+                                              <div
+                                                key={sIdx}
+                                                className={`${colorClass} h-full transition-all duration-150 cursor-help`}
+                                                style={{ width: `${seg.width}%` }}
+                                                title={tooltipText}
+                                              />
+                                            );
+                                          })
+                                        ) : (
+                                          <div className="w-full h-full bg-slate-100 flex items-center justify-center text-[7px] font-bold text-slate-400">
+                                            NO RECORD
+                                          </div>
+                                        )}
+                                      </div>
+                                    </td>
+                                    <td className="px-5 py-3.5 whitespace-nowrap">
+                                      <div className="flex flex-wrap gap-1">
+                                        {isOvertime && (
+                                          <span className="px-1.5 py-0.5 rounded bg-rose-50 text-rose-700 border border-rose-100 text-[8px] font-bold uppercase shadow-sm">
+                                            ⚠️ Overtime
+                                          </span>
+                                        )}
+                                        {isLate && (
+                                          <span className="px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-100 text-[8px] font-bold uppercase shadow-sm">
+                                            ⏱️ Late
+                                          </span>
+                                        )}
+                                        {!isOvertime && !isLate && (
+                                          <span className="text-[10px] text-slate-400 italic font-medium">None</span>
+                                        )}
+                                      </div>
+                                    </td>
+                                    <td className="px-5 py-3.5 whitespace-nowrap text-right">
+                                      <div className="flex items-center justify-end gap-1.5">
+                                        <button
+                                          onClick={() => setSelectedProfileEmpId(empId)}
+                                          className="text-blue-600 hover:bg-blue-50 p-1.5 rounded-lg border border-slate-200 bg-white transition-all cursor-pointer shadow-sm"
+                                          title="Detailed Profile & Analytics"
+                                        >
+                                          <BarChart3 className="h-3.5 w-3.5" />
+                                        </button>
+                                        
+                                        <button
+                                          onClick={async () => {
+                                            setSelectedProfileEmpId(empId);
+                                            setTimeout(() => {
+                                              handleDownloadIndividualPDF();
+                                            }, 400);
+                                          }}
+                                          className="text-slate-600 hover:bg-slate-50 p-1.5 rounded-lg border border-slate-200 bg-white transition-all cursor-pointer shadow-sm"
+                                          title="Quick Export PDF Report"
+                                        >
+                                          <Download className="h-3.5 w-3.5" />
+                                        </button>
+                                      </div>
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Pagination Controls */}
+                    {profileItemsPerPage !== 'All' && sortedAndFilteredProfiles.length > profileItemsPerPage && (
+                      <div className="flex items-center justify-between border-t border-slate-100 pt-4 mt-2">
+                        <p className="text-[10px] text-slate-505 font-medium">
+                          Showing <span className="font-bold text-slate-800">{(presencePage - 1) * profileItemsPerPage + 1}</span> to{' '}
+                          <span className="font-bold text-slate-800">
+                            {Math.min(presencePage * profileItemsPerPage, sortedAndFilteredProfiles.length)}
+                          </span>{' '}
+                          of <span className="font-bold text-slate-800">{sortedAndFilteredProfiles.length}</span> employees
+                        </p>
+                        <div className="flex items-center space-x-2">
+                          <button
+                            onClick={() => setPresencePage(prev => Math.max(prev - 1, 1))}
+                            disabled={presencePage === 1}
+                            className="px-2.5 py-1 border border-slate-200 bg-white hover:bg-slate-50 disabled:opacity-50 text-[10px] font-bold rounded-lg cursor-pointer transition-colors shadow-sm"
+                          >
+                            Prev
+                          </button>
+                          <button
+                            onClick={() => setPresencePage(prev => Math.min(prev + 1, totalPresencePages))}
+                            disabled={presencePage === totalPresencePages}
+                            className="px-2.5 py-1 border border-slate-200 bg-white hover:bg-slate-50 disabled:opacity-50 text-[10px] font-bold rounded-lg cursor-pointer transition-colors shadow-sm"
+                          >
+                            Next
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <div className="py-12 text-center text-slate-400 text-xs">
+                    No employee directory profiles match your query or filters.
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
         ) : (
           /* 2-Column Responsive Dashboard Layout */
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
@@ -3970,10 +4981,10 @@ const handleDownloadPDFReport = async () => {
               {/* Content Header */}
               <div className="p-4 border-b border-slate-200 bg-slate-50/50 flex items-center justify-between">
                 <span className="text-xs font-bold text-slate-900 uppercase tracking-wider font-sans">
-                  {activeTab === 'logs' ? '🕒 Detailed Punch Activity Logs' : '👥 Presence Status & Hours Compliance'}
+                  🕒 Detailed Punch Activity Logs
                 </span>
                 <span className="text-[10px] font-bold text-slate-400 font-mono">
-                  {activeTab === 'logs' ? `${filteredLogs.length} Records` : `${filteredEmployeesList.length} Staff Profiles`}
+                  {filteredLogs.length} Records
                 </span>
               </div>
 
@@ -4123,207 +5134,7 @@ const handleDownloadPDFReport = async () => {
                         Clear Filters
                       </button>
                     </div>
-                  )}
-                </div>
-              )}
-
-              {/* TAB 2: Presence & Shift Board Grid */}
-              {activeTab === 'presence' && (
-                <div className="p-5">
-                  {paginatedEmployees.length > 0 ? (
-                    <>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
-                        {paginatedEmployees.map(([empId, emp]) => {
-                          const statusData = employeePresenceMap[empId] || {
-                            status: 'OUT',
-                            lastPunchTime: null,
-                            hoursWorkedToday: 0,
-                            formattedTime: '0h 0m'
-                          };
-                          
-                          const isInside = statusData.status === 'IN';
-                          const shiftHoursGoal = 8;
-                          const completionPercent = Math.min((statusData.hoursWorkedToday / shiftHoursGoal) * 100, 100);
-                          const segments = getTimelineSegments(statusData.punchesToday, currentTime);
-
-                          let progressColor = 'bg-amber-500';
-                          if (statusData.hoursWorkedToday >= 7) {
-                            progressColor = 'bg-emerald-500';
-                          } else if (statusData.hoursWorkedToday >= 4) {
-                            progressColor = 'bg-blue-600';
-                          }
-
-                          return (
-                            <div 
-                              key={empId} 
-                              className="bg-white border border-slate-200 rounded-xl p-4 shadow-sm flex flex-col justify-between hover:border-slate-300 transition-all duration-200"
-                            >
-                              {/* Identity Header */}
-                              <div className="flex items-start justify-between gap-3">
-                                <div className="flex-1">
-                                  <div className="flex items-center gap-1.5">
-                                    <h4 className="text-xs font-bold text-slate-900">{emp.name}</h4>
-                                    <button
-                                      onClick={() => setSelectedProfileEmpId(empId)}
-                                      className="text-slate-400 hover:text-slate-600 transition-colors p-0.5 rounded hover:bg-slate-100 cursor-pointer"
-                                      title="View Detailed Profile & Analytics"
-                                    >
-                                      <BarChart3 className="h-3 w-3" />
-                                    </button>
-                                  </div>
-                                  <p className="text-[9px] font-mono text-slate-400 font-bold mt-0.5">{empId}</p>
-                                </div>
-                                
-                                {isInside ? (
-                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[9px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
-                                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
-                                    IN
-                                  </span>
-                                ) : (
-                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[9px] font-bold bg-slate-100 text-slate-500 border border-slate-250">
-                                    <span className="h-1.5 w-1.5 rounded-full bg-slate-400"></span>
-                                    OUT
-                                  </span>
-                                )}
-                              </div>
-
-                              {/* Hours worked progress */}
-                              <div className="mt-4 space-y-2.5">
-                                <div className="flex items-center justify-between text-[10px] border-b border-slate-50 pb-1.5">
-                                  <span className="text-slate-455 font-medium">Last Punch:</span>
-                                  <span className="font-mono text-slate-705 font-bold">
-                                    {statusData.lastPunchTime ? (
-                                      `${statusData.status} at ${new Date(statusData.lastPunchTime).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true })}`
-                                    ) : (
-                                      "No logs today"
-                                    )}
-                                  </span>
-                                </div>
-
-                                <div className="grid grid-cols-3 gap-2 bg-slate-50/50 p-2.5 rounded-xl border border-slate-150">
-                                  <div>
-                                    <p className="text-[8px] font-bold text-slate-400 uppercase tracking-wider">Active</p>
-                                    <p className="text-xs font-black text-slate-800 font-mono mt-0.5">
-                                      {statusData.formattedTime}
-                                    </p>
-                                  </div>
-                                  <div>
-                                    <p className="text-[8px] font-bold text-slate-450 uppercase tracking-wider">Break</p>
-                                    <p className="text-xs font-black text-amber-600 font-mono mt-0.5">
-                                      {statusData.formattedBreakTime || '0h 0m'}
-                                    </p>
-                                  </div>
-                                  <div className="text-right">
-                                    <p className="text-[8px] font-bold text-slate-400 uppercase tracking-wider">Goal</p>
-                                    <p className="text-xs font-black text-slate-500 font-mono mt-0.5">
-                                      {shiftHoursGoal}h
-                                    </p>
-                                  </div>
-                                </div>
-
-                                {/* Shift Timeline Sparkline */}
-                                <div className="space-y-1.5">
-                                  <div className="flex justify-between text-[8px] font-bold text-slate-400">
-                                    <span>Timeline Sparkline</span>
-                                    <span className="font-mono">8 AM - 8 PM</span>
-                                  </div>
-                                  <div className="w-full h-3 rounded-lg overflow-hidden border border-slate-150 flex bg-slate-100/60 shadow-inner">
-                                    {segments.length > 0 ? (
-                                      segments.map((seg, sIdx) => {
-                                        let colorClass = 'bg-slate-100'; // away
-                                        let tooltipText = '';
-                                        const startStr = seg.start.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true });
-                                        const endStr = seg.end.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true });
-
-                                        if (seg.type === 'active') {
-                                          colorClass = 'bg-emerald-500 hover:bg-emerald-600';
-                                          tooltipText = `Active: ${startStr} - ${endStr}`;
-                                        } else if (seg.type === 'break') {
-                                          colorClass = 'bg-amber-500 hover:bg-amber-600';
-                                          tooltipText = `Break: ${startStr} - ${endStr}`;
-                                        } else {
-                                          colorClass = 'bg-slate-200/50 hover:bg-slate-200';
-                                          tooltipText = `Away: ${startStr} - ${endStr}`;
-                                        }
-
-                                        return (
-                                          <div
-                                            key={sIdx}
-                                            className={`${colorClass} h-full transition-all cursor-pointer relative group/timeline-seg`}
-                                            style={{ width: `${seg.width}%` }}
-                                            title={tooltipText}
-                                          >
-                                            {/* Custom Tooltip */}
-                                            <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 hidden group-hover/timeline-seg:block z-50 bg-slate-900 text-white text-[8px] font-bold py-1 px-2 rounded shadow-md whitespace-nowrap pointer-events-none">
-                                              {tooltipText}
-                                            </div>
-                                          </div>
-                                        );
-                                      })
-                                    ) : (
-                                      <div 
-                                        className="w-full h-full bg-slate-100 hover:bg-slate-150/80 transition-colors flex items-center justify-center text-[8px] font-bold text-slate-400 cursor-help"
-                                        title="No punch activity recorded today."
-                                      >
-                                        No activity today
-                                      </div>
-                                    )}
-                                  </div>
-                                </div>
-
-                                {/* Progress bar */}
-                                <div className="space-y-1">
-                                  <div className="w-full bg-slate-100 h-1.5 rounded-full overflow-hidden border border-slate-150">
-                                    <div 
-                                      className={`h-full ${progressColor} transition-all duration-300`} 
-                                      style={{ width: `${completionPercent}%` }}
-                                    ></div>
-                                  </div>
-                                  <div className="flex justify-between text-[8px] font-bold text-slate-400">
-                                    <span>Shift Progress</span>
-                                    <span className="font-mono">{Math.round(completionPercent)}%</span>
-                                  </div>
-                                </div>
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-
-                      {/* Pagination Bar */}
-                      {filteredEmployeesList.length > EMPLOYEES_PER_PAGE && (
-                        <div className="flex items-center justify-between border-t border-slate-200 pt-4 bg-transparent">
-                          <div className="text-[10px] text-slate-500 font-medium">
-                            Showing <span className="font-bold text-slate-800">{(presencePage - 1) * EMPLOYEES_PER_PAGE + 1}</span> to{' '}
-                            <span className="font-bold text-slate-800">
-                              {Math.min(presencePage * EMPLOYEES_PER_PAGE, filteredEmployeesList.length)}
-                            </span>{' '}
-                            of <span className="font-bold text-slate-800">{filteredEmployeesList.length}</span> employees
-                          </div>
-                          <div className="flex gap-2">
-                            <button
-                              onClick={() => setPresencePage(prev => Math.max(prev - 1, 1))}
-                              disabled={presencePage === 1}
-                              className="px-2.5 py-1 border border-slate-200 bg-white hover:bg-slate-50 disabled:opacity-50 text-[10px] font-bold rounded-lg cursor-pointer transition-colors shadow-sm"
-                            >
-                              Previous
-                            </button>
-                            <button
-                              onClick={() => setPresencePage(prev => Math.min(prev + 1, totalPresencePages))}
-                              disabled={presencePage === totalPresencePages}
-                              className="px-2.5 py-1 border border-slate-200 bg-white hover:bg-slate-50 disabled:opacity-50 text-[10px] font-bold rounded-lg cursor-pointer transition-colors shadow-sm"
-                            >
-                              Next
-                            </button>
-                          </div>
-                        </div>
                       )}
-                    </>
-                  ) : (
-                    <div className="py-12 text-center text-slate-400 text-xs">
-                      No employee directory profiles match your query or filters.
-                    </div>
-                  )}
                 </div>
               )}
             </div>
@@ -4387,14 +5198,27 @@ const handleDownloadPDFReport = async () => {
                 </div>
               </div>
               
-              <button
-                onClick={() => setSelectedProfileEmpId(null)}
-                className="text-slate-400 hover:text-white hover:bg-slate-800 transition-all p-1.5 rounded-lg cursor-pointer"
-              >
-                <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={handleDownloadIndividualPDF}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-lg cursor-pointer transition-all shadow-sm border border-blue-500 hover:scale-[1.02]"
+                  title="Download Individual Performance PDF Report"
+                >
+                  <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                  </svg>
+                  Export PDF
+                </button>
+                
+                <button
+                  onClick={() => setSelectedProfileEmpId(null)}
+                  className="text-slate-400 hover:text-white hover:bg-slate-800 transition-all p-1.5 rounded-lg cursor-pointer"
+                >
+                  <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
             </div>
 
             {/* Modal Body */}
@@ -4495,6 +5319,63 @@ const handleDownloadPDFReport = async () => {
                 </div>
               </div>
 
+              {/* 30-Day Attendance Heatmap & Trend */}
+              <div className="bg-slate-50 border border-slate-150 p-5 rounded-2xl">
+                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 mb-4">
+                  <h4 className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                    30-Day Attendance Heatmap & Trend
+                  </h4>
+                  <div className="flex flex-wrap items-center gap-3 text-[9px] font-bold text-slate-500">
+                    <span className="flex items-center gap-1"><span className="h-2 w-2 rounded bg-slate-200"></span> Absent</span>
+                    <span className="flex items-center gap-1"><span className="h-2 w-2 rounded bg-amber-500"></span> Short Hours</span>
+                    <span className="flex items-center gap-1"><span className="h-2 w-2 rounded bg-emerald-500"></span> Goal Met</span>
+                    <span className="flex items-center gap-1"><span className="h-2 w-2 rounded border border-rose-400 bg-white"></span> Late Arrival</span>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-5 sm:grid-cols-10 gap-2.5">
+                  {heatmapDays.map((item, idx) => {
+                    const { date, summary } = item;
+                    const dateFormatted = date.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
+                    
+                    let bgClass = 'bg-slate-200/70 hover:bg-slate-300/80 text-slate-400';
+                    let borderClass = 'border-transparent';
+                    let tooltipText = `${dateFormatted}: Absent (No Logs)`;
+                    
+                    if (summary) {
+                      const hrs = Math.floor(summary.hoursWorked);
+                      const mins = Math.round((summary.hoursWorked % 1) * 60);
+                      
+                      if (summary.isGoalMet) {
+                        bgClass = 'bg-emerald-500 hover:bg-emerald-600 text-white';
+                      } else {
+                        bgClass = 'bg-amber-500 hover:bg-amber-600 text-white';
+                      }
+                      
+                      if (!summary.isOnTime) {
+                        borderClass = 'border-rose-455 border-2';
+                      }
+                      
+                      tooltipText = `${dateFormatted}: ${hrs}h ${mins}m worked | In: ${summary.firstIn} | Out: ${summary.lastOut} ${summary.isOnTime ? '(On-time)' : '(Late)'}`;
+                    }
+
+                    return (
+                      <div
+                        key={idx}
+                        className={`aspect-square rounded-xl flex flex-col items-center justify-center text-[10px] font-black transition-all cursor-help relative group/heatmap-cell ${bgClass} ${borderClass} border shadow-inner`}
+                        title={tooltipText}
+                      >
+                        {date.getDate()}
+                        {/* Custom Tooltip */}
+                        <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover/heatmap-cell:block z-50 bg-slate-950 text-white text-[9px] font-bold py-1.5 px-2.5 rounded-lg shadow-xl whitespace-nowrap pointer-events-none border border-slate-800">
+                          {tooltipText}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
               {/* Attendance Log History */}
               <div className="space-y-3">
                 <div className="flex items-center justify-between">
@@ -4562,6 +5443,129 @@ const handleDownloadPDFReport = async () => {
               >
                 Close Profile
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+        </div>
+      )}
+
+      {/* Login Overlay */}
+      {showLogin && (
+        <div className={`fixed inset-0 z-50 bg-slate-50 flex flex-col justify-center py-12 px-4 sm:px-6 lg:px-8 transition-all duration-800 ease-out ${
+          isLoginFading ? 'opacity-0 pointer-events-none scale-95' : 'opacity-100 animate-fadeIn'
+        }`}>
+          <div className="sm:mx-auto sm:w-full sm:max-w-md flex flex-col items-center">
+            <div className="bg-white p-2.5 rounded-2xl shadow-md mb-4 border border-slate-200 w-16 h-16 flex items-center justify-center shrink-0 hover:scale-105 transition-all duration-300 animate-fadeIn">
+              <img src="/dpi.png" alt="DPI Logo" className="h-11 w-11 object-contain" />
+            </div>
+            <h2 className="text-center text-xl sm:text-2xl font-black tracking-tight text-slate-900">
+              Sign in to DPI Attendance
+            </h2>
+            <p className="mt-1 text-center text-[10px] sm:text-xs text-slate-500 font-bold uppercase tracking-widest font-sans">
+              Secured Dashboard System
+            </p>
+          </div>
+
+          <div className="mt-8 sm:mx-auto sm:w-full sm:max-w-md">
+            <div className="bg-white border border-slate-200/80 shadow-xl rounded-2xl p-6 sm:p-10 space-y-6 animate-fadeIn">
+              {loginError && (
+                <div className="bg-rose-50 border border-rose-100 text-rose-800 p-3 rounded-lg text-xs font-bold flex items-center gap-2">
+                  <AlertTriangle className="h-4 w-4 shrink-0" />
+                  <span>{loginError}</span>
+                </div>
+              )}
+
+              <form className="space-y-5" onSubmit={handleLogin}>
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">
+                    Username
+                  </label>
+                  <div className="relative">
+                    <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
+                      <User className="h-4 w-4" />
+                    </div>
+                    <input
+                      type="text"
+                      required
+                      value={loginUsername}
+                      onChange={(e) => setLoginUsername(e.target.value)}
+                      placeholder="Enter username"
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl pl-10 pr-3.5 py-2.5 text-xs font-semibold text-slate-808 placeholder-slate-400 focus:outline-none focus:bg-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-all font-mono"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">
+                    Password
+                  </label>
+                  <div className="relative">
+                    <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
+                      <Lock className="h-4 w-4" />
+                    </div>
+                    <input
+                      type="password"
+                      required
+                      value={loginPassword}
+                      onChange={(e) => setLoginPassword(e.target.value)}
+                      placeholder="••••••••"
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl pl-10 pr-3.5 py-2.5 text-xs font-semibold text-slate-808 placeholder-slate-400 focus:outline-none focus:bg-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-all font-mono"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <button
+                    type="submit"
+                    className="w-full flex justify-center py-2.5 px-4 border border-transparent rounded-xl shadow-md text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 active:scale-[0.98] focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition-all cursor-pointer"
+                  >
+                    Sign In
+                  </button>
+                </div>
+              </form>
+
+              <div className="text-center pt-2 border-t border-slate-100">
+                <p className="text-[9px] font-bold uppercase tracking-wider text-slate-400">
+                  Secured Administrative Console
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* App Loader Overlay */}
+      {showLoader && (
+        <div className={`fixed inset-0 z-[100] bg-slate-50 flex flex-col items-center justify-center p-4 transition-all duration-800 ease-out ${
+          isLoaderFading ? 'opacity-0 pointer-events-none scale-105' : 'opacity-100'
+        }`}>
+          <div className="flex flex-col items-center max-w-sm text-center space-y-6">
+            <div className="relative flex items-center justify-center h-28 w-28">
+              {/* Biometric pulse waves */}
+              <div className="absolute inset-0 rounded-full border border-blue-500/30 animate-wave1"></div>
+              <div className="absolute inset-0 rounded-full border border-blue-500/20 animate-wave2"></div>
+              {/* Spinning orbital dash ring */}
+              <div className="absolute inset-0 rounded-full border border-dashed border-slate-200/80 animate-orbit"></div>
+              {/* Rotating glow aura */}
+              <div className="absolute inset-[-8px] rounded-full bg-gradient-to-tr from-blue-500/10 via-indigo-500/5 to-cyan-500/10 animate-spin-slow"></div>
+              {/* Inner pulsing glow */}
+              <div className="absolute inset-4 rounded-full bg-blue-500/5 blur-xl animate-pulse"></div>
+              {/* Outer spinning ring */}
+              <div className="absolute inset-2 rounded-full border-2 border-slate-200 border-t-blue-600 animate-spin"></div>
+              {/* Logo container */}
+              <div className="absolute inset-6 bg-white/90 backdrop-blur-sm border border-slate-200/60 rounded-2xl shadow-[0_8px_30px_rgba(0,0,0,0.04)] flex items-center justify-center p-3 animate-logoPulse">
+                <img src="/dpi.png" alt="DPI Logo" className="h-12 w-12 object-contain" />
+              </div>
+            </div>
+            <div className="space-y-2">
+              <h2 className="text-slate-800 font-extrabold text-lg tracking-tight font-sans">DPI Attendance</h2>
+              <p className="text-slate-400 text-[9px] font-bold uppercase tracking-widest font-mono animate-pulse">
+                Initializing Secure Connection...
+              </p>
+            </div>
+            <div className="w-32 bg-slate-200 h-0.5 rounded-full overflow-hidden border border-slate-100 relative">
+              <div className="absolute top-0 bottom-0 bg-blue-600 rounded-full animate-shimmer" style={{ width: '40%' }}></div>
             </div>
           </div>
         </div>
