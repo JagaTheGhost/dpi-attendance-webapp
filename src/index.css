@@ -2,7 +2,7 @@
 
 @theme {
   --animate-flashRow: flash 2s ease-out;
-  --animate-fadeIn: fadeIn 0.8s ease-out;
+  --animate-fadeIn: fadeIn 0.3s ease-out;
   --animate-shimmer: shimmer 2.5s infinite ease-in-out;
   --animate-logoPulse: logoPulse 2.5s infinite ease-in-out;
   --animate-scan: scan 2s infinite ease-in-out;

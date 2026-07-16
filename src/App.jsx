@@ -452,8 +452,8 @@ export default function App() {
         setTimeout(() => {
           setIsInitializing(false);
           setIsLoaderFading(false);
-        }, 800);
-      }, 1200);
+        }, 300);
+      }, 600);
     }
   };
 
@@ -466,7 +466,7 @@ export default function App() {
       localStorage.setItem('dpi_authenticated', 'true');
       setTimeout(() => {
         setIsLoginFading(false);
-      }, 800);
+      }, 300);
     } else {
       setLoginError('Invalid admin credentials. Please try again.');
     }
@@ -5452,7 +5452,7 @@ const handleDownloadPDFReport = async () => {
 
       {/* Login Overlay */}
       {showLogin && (
-        <div className={`fixed inset-0 z-50 bg-slate-50 flex flex-col justify-center py-12 px-4 sm:px-6 lg:px-8 transition-all duration-800 ease-out ${
+        <div className={`fixed inset-0 z-50 bg-slate-50 flex flex-col justify-center py-12 px-4 sm:px-6 lg:px-8 transition-all duration-300 ease-out ${
           isLoginFading ? 'opacity-0 pointer-events-none scale-95' : 'opacity-100 animate-fadeIn'
         }`}>
           <div className="sm:mx-auto sm:w-full sm:max-w-md flex flex-col items-center">
@@ -5537,7 +5537,7 @@ const handleDownloadPDFReport = async () => {
 
       {/* App Loader Overlay */}
       {showLoader && (
-        <div className={`fixed inset-0 z-[100] bg-slate-50 flex flex-col items-center justify-center p-4 transition-all duration-800 ease-out ${
+        <div className={`fixed inset-0 z-[100] bg-slate-50 flex flex-col items-center justify-center p-4 transition-all duration-300 ease-out ${
           isLoaderFading ? 'opacity-0 pointer-events-none scale-105' : 'opacity-100'
         }`}>
           <div className="flex flex-col items-center max-w-sm text-center space-y-6">
