@@ -1,0 +1,21 @@
+{
+  "short_name": "DPI Attendance",
+  "name": "DPI Attendance System",
+  "icons": [
+    {
+      "src": "/dpi.png",
+      "type": "image/png",
+      "sizes": "192x192"
+    },
+    {
+      "src": "/dpi.png",
+      "type": "image/png",
+      "sizes": "512x512"
+    }
+  ],
+  "start_url": "/",
+  "background_color": "#f8fafc",
+  "display": "standalone",
+  "theme_color": "#2563eb",
+  "orientation": "portrait"
+}
