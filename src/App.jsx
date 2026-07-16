@@ -143,6 +143,11 @@ const chunkArray = (array, size) => {
   return result;
 };
 
+const toLocalISOString = (date) => {
+  const pad = (num) => String(num).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+};
+
 const injectVirtualLogs = (rawLogs, currentTime = new Date()) => {
   if (!rawLogs || rawLogs.length === 0) return [];
   
@@ -166,9 +171,9 @@ const injectVirtualLogs = (rawLogs, currentTime = new Date()) => {
       const lastLog = dayLogs[dayLogs.length - 1];
 
       if (lastLog.direction === 'IN') {
-        const firstInTime = parseDBDate(dayLogs[0].timestamp);
-        let autoOutTime = new Date(firstInTime.getTime() + 8 * 60 * 60 * 1000);
-        const endOfDay = new Date(firstInTime);
+        const lastInTime = parseDBDate(lastLog.timestamp);
+        let autoOutTime = new Date(lastInTime.getTime() + 8 * 60 * 60 * 1000);
+        const endOfDay = new Date(lastInTime);
         endOfDay.setHours(23, 59, 59, 999);
         if (autoOutTime > endOfDay) {
           autoOutTime = endOfDay;
@@ -177,7 +182,7 @@ const injectVirtualLogs = (rawLogs, currentTime = new Date()) => {
         virtualLogs.push({
           log_id: `SYS-${empId}-${dateStr.replace(/ /g, '-')}`,
           employee_id: empId,
-          timestamp: autoOutTime.toISOString(),
+          timestamp: toLocalISOString(autoOutTime),
           direction: 'SYS_OUT',
           isSystemGenerated: true
         });
