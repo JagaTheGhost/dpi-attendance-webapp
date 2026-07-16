@@ -375,9 +375,10 @@ export default function App() {
       
       if (empError) throw empError;
 
+      const employeeMap = {};
       if (empData && empData.length > 0) {
-        const employeeMap = {};
         empData.forEach(emp => {
+          if (emp.company_name === 'X') return; // Filter out company 'X'
           employeeMap[emp.id] = {
             name: emp.name,
             department: emp.department,
@@ -398,12 +399,15 @@ export default function App() {
       if (logsError) throw logsError;
 
       if (logsData) {
-        const formattedLogs = logsData.map(log => ({
-          log_id: `LOG-${log.id}`,
-          employee_id: log.employee_id,
-          timestamp: log.timestamp,
-          direction: log.direction
-        }));
+        // Filter out logs for employees not in the active roster (excludes company X)
+        const formattedLogs = logsData
+          .filter(log => !employeeMap || employeeMap[log.employee_id])
+          .map(log => ({
+            log_id: `LOG-${log.id}`,
+            employee_id: log.employee_id,
+            timestamp: log.timestamp,
+            direction: log.direction
+          }));
         setLogs(formattedLogs);
       }
 
@@ -458,6 +462,13 @@ export default function App() {
         { event: 'INSERT', schema: 'public', table: 'biometric_logs' },
         (payload) => {
           console.log("Realtime biometric log insert detected in Supabase:", payload);
+          
+          // Ignore logs for employees who are not in our filtered list (excludes company 'X')
+          if (!employees[payload.new.employee_id]) {
+            console.log("Realtime log ignored: employee is not in the active roster.");
+            return;
+          }
+
           const newLog = {
             log_id: `LOG-${payload.new.id}`,
             employee_id: payload.new.employee_id,
@@ -485,7 +496,7 @@ export default function App() {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [isSupabaseMode]);
+  }, [isSupabaseMode, employees]);
 
   // ==========================================
   // 5. Automatic Fallback Polling (15 Mins)
@@ -1447,12 +1458,14 @@ export default function App() {
 
       if (error) throw error;
 
-      const mapped = (data || []).map(log => ({
-        log_id: `LOG-${log.id}`,
-        employee_id: log.employee_id,
-        timestamp: log.timestamp,
-        direction: log.direction
-      }));
+      const mapped = (data || [])
+        .filter(log => employees[log.employee_id]) // ONLY include active employees (excludes company 'X')
+        .map(log => ({
+          log_id: `LOG-${log.id}`,
+          employee_id: log.employee_id,
+          timestamp: log.timestamp,
+          direction: log.direction
+        }));
 
       return injectVirtualLogs(mapped, currentTime);
     } catch (e) {
@@ -1594,12 +1607,14 @@ export default function App() {
           if (query) {
             const { data, error } = await query.order('timestamp', { ascending: false });
             if (!error && data) {
-              const mapped = data.map(log => ({
-                log_id: `LOG-${log.id}`,
-                employee_id: log.employee_id,
-                timestamp: log.timestamp,
-                direction: log.direction
-              }));
+              const mapped = data
+                .filter(log => employees[log.employee_id]) // ONLY include active employees (excludes company 'X')
+                .map(log => ({
+                  log_id: `LOG-${log.id}`,
+                  employee_id: log.employee_id,
+                  timestamp: log.timestamp,
+                  direction: log.direction
+                }));
               fetched = injectVirtualLogs(mapped, currentTime);
             }
           }
