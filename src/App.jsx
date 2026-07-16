@@ -13,9 +13,59 @@ import {
   Check,
   ChevronDown,
   AlertTriangle,
-  Coffee
+  Coffee,
+  BarChart3
 } from 'lucide-react';
 import { supabase } from './supabaseClient';
+import * as XLSX from 'xlsx';
+import { jsPDF } from 'jspdf';
+import html2canvas from 'html2canvas-pro';
+
+// Parse DB timestamp strings as local times to avoid timezone mismatches
+const parseDBDate = (timestampStr) => {
+  if (!timestampStr) return new Date();
+  if (timestampStr instanceof Date) return timestampStr;
+  if (typeof timestampStr === 'string') {
+    if (timestampStr.includes('T')) {
+      return new Date(timestampStr.slice(0, 19));
+    }
+    if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}/.test(timestampStr)) {
+      return new Date(timestampStr.slice(0, 19).replace(' ', 'T'));
+    }
+  }
+  return new Date(timestampStr);
+};
+
+// Calculate boundary ISO strings for attendance date scope
+const getDateRangeBounds = (range, startInput, endInput) => {
+  const start = new Date();
+  const end = new Date();
+
+  if (range === 'today') {
+    start.setHours(0, 0, 0, 0);
+    end.setHours(23, 59, 59, 999);
+  } else if (range === 'yesterday') {
+    start.setDate(start.getDate() - 1);
+    start.setHours(0, 0, 0, 0);
+    end.setDate(end.getDate() - 1);
+    end.setHours(23, 59, 59, 999);
+  } else if (range === 'week') {
+    start.setDate(start.getDate() - 6);
+    start.setHours(0, 0, 0, 0);
+    end.setHours(23, 59, 59, 999);
+  } else if (range === 'custom') {
+    const s = new Date(startInput);
+    s.setHours(0, 0, 0, 0);
+    const e = new Date(endInput);
+    e.setHours(23, 59, 59, 999);
+    return { startISO: s.toISOString(), endISO: e.toISOString() };
+  }
+
+  return {
+    startISO: start.toISOString(),
+    endISO: end.toISOString()
+  };
+};
 
 // ==========================================
 // 1. Static Fallback Data
@@ -99,7 +149,7 @@ const injectVirtualLogs = (rawLogs, currentTime = new Date()) => {
   const logsByEmpAndDate = {};
   rawLogs.forEach(log => {
     const empId = log.employee_id;
-    const dateStr = new Date(log.timestamp).toDateString();
+    const dateStr = parseDBDate(log.timestamp).toDateString();
     if (!logsByEmpAndDate[empId]) logsByEmpAndDate[empId] = {};
     if (!logsByEmpAndDate[empId][dateStr]) logsByEmpAndDate[empId][dateStr] = [];
     logsByEmpAndDate[empId][dateStr].push(log);
@@ -112,11 +162,11 @@ const injectVirtualLogs = (rawLogs, currentTime = new Date()) => {
     Object.keys(logsByEmpAndDate[empId]).forEach(dateStr => {
       if (dateStr === todayStr) return;
 
-      const dayLogs = [...logsByEmpAndDate[empId][dateStr]].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+      const dayLogs = [...logsByEmpAndDate[empId][dateStr]].sort((a, b) => parseDBDate(a.timestamp) - parseDBDate(b.timestamp));
       const lastLog = dayLogs[dayLogs.length - 1];
 
       if (lastLog.direction === 'IN') {
-        const firstInTime = new Date(dayLogs[0].timestamp);
+        const firstInTime = parseDBDate(dayLogs[0].timestamp);
         let autoOutTime = new Date(firstInTime.getTime() + 8 * 60 * 60 * 1000);
         const endOfDay = new Date(firstInTime);
         endOfDay.setHours(23, 59, 59, 999);
@@ -135,7 +185,7 @@ const injectVirtualLogs = (rawLogs, currentTime = new Date()) => {
     });
   });
 
-  return [...rawLogs, ...virtualLogs].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+  return [...rawLogs, ...virtualLogs].sort((a, b) => parseDBDate(b.timestamp) - parseDBDate(a.timestamp));
 };
 
 export default function App() {
@@ -154,12 +204,20 @@ export default function App() {
   const [isSupabaseMode, setIsSupabaseMode] = useState(false);
   const [isLoadingData, setIsLoadingData] = useState(false);
   const [dbError, setDbError] = useState(null);
+
+  // Authentication & Initial Splash states
+  const [isAuthenticated, setIsAuthenticated] = useState(() => localStorage.getItem('dpi_authenticated') === 'true');
+  const [isInitializing, setIsInitializing] = useState(true);
+  const [loginUsername, setLoginUsername] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
+  const [loginError, setLoginError] = useState(null);
   
   // Navigation & Pagination state
   const [activeTab, setActiveTab] = useState('logs'); // 'logs' or 'presence'
   const [activeChartTab, setActiveChartTab] = useState('hourly'); // 'hourly' or 'weekly'
   const [logsPage, setLogsPage] = useState(1);
   const [presencePage, setPresencePage] = useState(1);
+  const [selectedProfileEmpId, setSelectedProfileEmpId] = useState(null);
 
   // Advanced Export Hub State
   const [exportReportType, setExportReportType] = useState('logs'); // 'logs' | 'timesheet'
@@ -173,11 +231,57 @@ export default function App() {
   const [exportGroupSearch, setExportGroupSearch] = useState('');
   const [hasInitializedGroup, setHasInitializedGroup] = useState(false);
 
+  // Custom PDF Builder states
+  const [pdfThemeColor, setPdfThemeColor] = useState('blue'); // 'slate' | 'blue' | 'emerald' | 'indigo'
+  const [pdfCompanyName, setPdfCompanyName] = useState('DPI Attendance Systems');
+  const [pdfComments, setPdfComments] = useState('Confidential. Generated from system logs.');
+  const [pdfLogColumns, setPdfLogColumns] = useState({
+    logId: true,
+    empId: true,
+    empName: true,
+    direction: true,
+    date: true,
+    time: true
+  });
+  const [pdfTimesheetColumns, setPdfTimesheetColumns] = useState({
+    empId: true,
+    empName: true,
+    daysPresent: true,
+    punchesCount: true,
+    totalHours: true,
+    totalBreakHours: true,
+    avgDailyHours: true,
+    goalStatus: true
+  });
+  const [pdfReportHtml, setPdfReportHtml] = useState(null);
+  const [isGeneratingPDF, setIsGeneratingPDF] = useState(false);
+
   const [isSingleDropdownOpen, setIsSingleDropdownOpen] = useState(false);
   const [isGroupDropdownOpen, setIsGroupDropdownOpen] = useState(false);
   const [isStatusDropdownOpen, setIsStatusDropdownOpen] = useState(false);
   const [isExportDateDropdownOpen, setIsExportDateDropdownOpen] = useState(false);
   const [exportSingleSearch, setExportSingleSearch] = useState('');
+
+  // Global Department, Leaves, and Analytics Filter States
+  const [departmentFilter, setDepartmentFilter] = useState('All'); // 'All' | 'Engineering' | 'Operations' | 'Marketing' | 'HR' | 'Sales'
+  const [employeeLeaves, setEmployeeLeaves] = useState({
+    "EMP-003": true, // Arun Kumar is marked on Leave (Operations)
+    "EMP-006": true  // Sneha Reddy is marked on Leave (HR)
+  });
+  
+  const [analyticsDateScope, setAnalyticsDateScope] = useState('week'); // 'today' | 'yesterday' | 'week' | 'custom'
+  const [analyticsStartDate, setAnalyticsStartDate] = useState(() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 7);
+    return d.toISOString().slice(0, 10);
+  });
+  const [analyticsEndDate, setAnalyticsEndDate] = useState(() => {
+    return new Date().toISOString().slice(0, 10);
+  });
+  
+  // Dropdowns UI state
+  const [isDeptDropdownOpen, setIsDeptDropdownOpen] = useState(false);
+  const [isAnalyticsDateDropdownOpen, setIsAnalyticsDateDropdownOpen] = useState(false);
 
   // Handle closing custom dropdowns on click outside
   useEffect(() => {
@@ -193,6 +297,12 @@ export default function App() {
       }
       if (!e.target.closest('.export-date-dropdown-container')) {
         setIsExportDateDropdownOpen(false);
+      }
+      if (!e.target.closest('.dept-dropdown-container')) {
+        setIsDeptDropdownOpen(false);
+      }
+      if (!e.target.closest('.analytics-date-dropdown-container')) {
+        setIsAnalyticsDateDropdownOpen(false);
       }
     };
     document.addEventListener('click', handleOutsideClick);
@@ -307,7 +417,28 @@ export default function App() {
       if (showLoadingIndicator) {
         setIsLoadingData(false);
       }
+      setTimeout(() => {
+        setIsInitializing(false);
+      }, 1200);
     }
+  };
+
+  const handleLogin = (e) => {
+    if (e) e.preventDefault();
+    if (loginUsername === 'ADMIN_DPI' && loginPassword === 'fortress') {
+      setIsAuthenticated(true);
+      setLoginError(null);
+      localStorage.setItem('dpi_authenticated', 'true');
+    } else {
+      setLoginError('Invalid admin credentials. Please try again.');
+    }
+  };
+
+  const handleLogout = () => {
+    setIsAuthenticated(false);
+    setLoginUsername('');
+    setLoginPassword('');
+    localStorage.removeItem('dpi_authenticated');
   };
 
   useEffect(() => {
@@ -421,7 +552,7 @@ export default function App() {
       const empId = log.employee_id;
       if (!map[empId]) return;
 
-      const logDate = new Date(log.timestamp);
+      const logDate = parseDBDate(log.timestamp);
       const isToday = logDate.toDateString() === currentTime.toDateString();
 
       // Track last state globally
@@ -441,7 +572,7 @@ export default function App() {
       let lastInTime = null;
 
       todayPunches.forEach(punch => {
-        const time = new Date(punch.timestamp);
+        const time = parseDBDate(punch.timestamp);
         if (punch.direction === 'IN') {
           lastInTime = time;
         } else if ((punch.direction === 'OUT' || punch.direction === 'SYS_OUT') && lastInTime) {
@@ -459,9 +590,9 @@ export default function App() {
       let breakMs = 0;
       const firstInPunch = todayPunches.find(p => p.direction === 'IN');
       if (firstInPunch) {
-        const firstInTime = new Date(firstInPunch.timestamp);
+        const firstInTime = parseDBDate(firstInPunch.timestamp);
         const lastPunch = todayPunches[todayPunches.length - 1];
-        const endReferenceTime = lastPunch.direction === 'IN' ? currentTime : new Date(lastPunch.timestamp);
+        const endReferenceTime = lastPunch.direction === 'IN' ? currentTime : parseDBDate(lastPunch.timestamp);
         const totalSpanMs = endReferenceTime - firstInTime;
         breakMs = Math.max(0, totalSpanMs - totalMs);
       }
@@ -501,7 +632,7 @@ export default function App() {
       // Late arrival check (first IN of today after 09:15)
       const todayInPunches = presence.punchesToday.filter(p => p.direction === 'IN');
       if (todayInPunches.length > 0) {
-        const firstIn = new Date(todayInPunches[0].timestamp);
+        const firstIn = parseDBDate(todayInPunches[0].timestamp);
         const hours = firstIn.getHours();
         const minutes = firstIn.getMinutes();
         const arrivalMinutes = hours * 60 + minutes;
@@ -529,7 +660,7 @@ export default function App() {
       let totalMs = 0;
       let lastInTime = null;
       todayPunches.forEach(punch => {
-        const time = new Date(punch.timestamp);
+        const time = parseDBDate(punch.timestamp);
         if (punch.direction === 'IN') {
           lastInTime = time;
         } else if ((punch.direction === 'OUT' || punch.direction === 'SYS_OUT') && lastInTime) {
@@ -543,9 +674,9 @@ export default function App() {
       
       const firstInPunch = todayPunches.find(p => p.direction === 'IN');
       if (firstInPunch) {
-        const firstInTime = new Date(firstInPunch.timestamp);
+        const firstInTime = parseDBDate(firstInPunch.timestamp);
         const lastPunch = todayPunches[todayPunches.length - 1];
-        const endReferenceTime = lastPunch.direction === 'IN' ? currentTime : new Date(lastPunch.timestamp);
+        const endReferenceTime = lastPunch.direction === 'IN' ? currentTime : parseDBDate(lastPunch.timestamp);
         const totalSpanMs = endReferenceTime - firstInTime;
         const breakMs = Math.max(0, totalSpanMs - totalMs);
         const breakMinutes = breakMs / 1000 / 60;
@@ -562,7 +693,7 @@ export default function App() {
     // Count SYS_OUT logs
     processedLogs.forEach(log => {
       if (log.direction === 'SYS_OUT') {
-        const logDate = new Date(log.timestamp).toDateString();
+        const logDate = parseDBDate(log.timestamp).toDateString();
         if (logDate === todayStr) {
           sysOutToday++;
         } else if (logDate === yesterdayStr) {
@@ -588,11 +719,13 @@ export default function App() {
       const emp = employees[log.employee_id];
       if (!emp) return false;
 
-      return searchQuery.trim() === '' || 
+      const matchesDept = departmentFilter === 'All' || emp.department === departmentFilter;
+
+      return matchesDept && (searchQuery.trim() === '' || 
         emp.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        log.employee_id.toLowerCase().includes(searchQuery.toLowerCase());
+        log.employee_id.toLowerCase().includes(searchQuery.toLowerCase()));
     });
-  }, [processedLogs, employees, searchQuery]);
+  }, [processedLogs, employees, searchQuery, departmentFilter]);
 
   const filteredLogs = useMemo(() => {
     return logsFilteredBySearch.filter(log => {
@@ -604,14 +737,14 @@ export default function App() {
       // Filter by Date (Today vs All)
       let matchesDate = true;
       if (dateScope === 'today') {
-        const logDate = new Date(log.timestamp);
+        const logDate = parseDBDate(log.timestamp);
         matchesDate = logDate.toDateString() === currentTime.toDateString();
       }
 
       // Filter by Hour
       let matchesHour = true;
       if (selectedHourFilter !== null) {
-        const logDate = new Date(log.timestamp);
+        const logDate = parseDBDate(log.timestamp);
         matchesHour = logDate.getHours() === selectedHourFilter;
       }
 
@@ -622,6 +755,8 @@ export default function App() {
   // Filtered employees for Presence Grid Board
   const filteredEmployeesList = useMemo(() => {
     return Object.entries(employees).filter(([empId, emp]) => {
+      const matchesDept = departmentFilter === 'All' || emp.department === departmentFilter;
+
       const matchesSearch = searchQuery.trim() === '' || 
         emp.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
         empId.toLowerCase().includes(searchQuery.toLowerCase());
@@ -629,12 +764,366 @@ export default function App() {
       const statusData = employeePresenceMap[empId] || { status: 'OUT' };
       const matchesStatus = statusFilter === 'All' || statusData.status === statusFilter;
 
-      return matchesSearch && matchesStatus;
+      return matchesDept && matchesSearch && matchesStatus;
     });
-  }, [employees, searchQuery, statusFilter, employeePresenceMap]);
+  }, [employees, searchQuery, statusFilter, employeePresenceMap, departmentFilter]);
 
   // ==========================================
-  // 9. Pagination Calculators (useMemo)
+  // 9. Advanced Analytics Calculation (useMemo)
+  // ==========================================
+  const analyticsData = useMemo(() => {
+    const { startISO, endISO } = getDateRangeBounds(analyticsDateScope, analyticsStartDate, analyticsEndDate);
+    const startDateObj = new Date(startISO);
+    const endDateObj = new Date(endISO);
+    
+    // Filter employees by department
+    const targetEmployees = {};
+    Object.entries(employees).forEach(([empId, emp]) => {
+      if (departmentFilter === 'All' || emp.department === departmentFilter) {
+        targetEmployees[empId] = emp;
+      }
+    });
+    
+    const totalDeptEmployees = Object.keys(targetEmployees).length;
+
+    // Filter logs for this range and department
+    const rangeLogs = logs.filter(log => {
+      const logDate = parseDBDate(log.timestamp);
+      const isWithinDate = logDate >= startDateObj && logDate <= endDateObj;
+      const isTargetEmployee = !!targetEmployees[log.employee_id];
+      return isWithinDate && isTargetEmployee;
+    });
+
+    // Group logs by employee and day
+    const groupedLogs = {}; // { empId: { dateStr: [logs] } }
+    const dailyPresence = {}; // { dateStr: Set(presentEmpIds) }
+    
+    // Fill in dates range to render trend lines
+    const dailyWorkedHours = {}; // { dateStr: { totalHours: 0, count: 0 } }
+    const dailyLateCounts = {}; // { dateStr: 0 }
+    
+    let loop = new Date(startDateObj);
+    while (loop <= endDateObj) {
+      const dateStr = loop.toDateString();
+      dailyPresence[dateStr] = new Set();
+      dailyWorkedHours[dateStr] = { totalHours: 0, count: 0 };
+      dailyLateCounts[dateStr] = 0;
+      loop.setDate(loop.getDate() + 1);
+    }
+
+    rangeLogs.forEach(log => {
+      const empId = log.employee_id;
+      const logDate = parseDBDate(log.timestamp);
+      const dateStr = logDate.toDateString();
+
+      if (!groupedLogs[empId]) groupedLogs[empId] = {};
+      if (!groupedLogs[empId][dateStr]) groupedLogs[empId][dateStr] = [];
+      groupedLogs[empId][dateStr].push(log);
+
+      // Track presence
+      if (dailyPresence[dateStr]) {
+        dailyPresence[dateStr].add(empId);
+      }
+    });
+
+    // Punctuality & hours aggregators
+    let totalLateCount = 0;
+    let totalEarlyDepartures = 0;
+    let sumArrivalMinutes = 0;
+    let countArrivals = 0;
+    let sumDepartureMinutes = 0;
+    let countDepartures = 0;
+
+    let totalOvertimeHours = 0;
+    let totalWorkedHoursSum = 0;
+    let totalPresenceRecords = 0;
+
+    const employeeStats = {}; // { empId: { totalHours: 0, daysPresent: 0, lateCount: 0, earlyCount: 0, firstInTimes: [] } }
+    
+    // Exception buckets
+    const missingIn = [];
+    const missingOut = [];
+    const duplicates = [];
+    
+    // Duplicate detection threshold
+    const DUPLICATE_THRESHOLD_MS = 3 * 60 * 1000; // 3 minutes
+
+    Object.keys(targetEmployees).forEach(empId => {
+      employeeStats[empId] = {
+        empId,
+        name: targetEmployees[empId].name,
+        department: targetEmployees[empId].department,
+        totalHours: 0,
+        daysPresent: 0,
+        lateCount: 0,
+        earlyCount: 0,
+        firstInTimes: []
+      };
+
+      const daysMap = groupedLogs[empId] || {};
+      Object.keys(daysMap).forEach(dateStr => {
+        const dayLogs = [...daysMap[dateStr]].sort((a, b) => parseDBDate(a.timestamp) - parseDBDate(b.timestamp));
+        if (dayLogs.length === 0) return;
+
+        employeeStats[empId].daysPresent++;
+        totalPresenceRecords++;
+
+        // Duplicate checks
+        for (let i = 0; i < dayLogs.length - 1; i++) {
+          const t1 = parseDBDate(dayLogs[i].timestamp);
+          const t2 = parseDBDate(dayLogs[i + 1].timestamp);
+          if (dayLogs[i].direction === dayLogs[i + 1].direction && (t2 - t1) < DUPLICATE_THRESHOLD_MS) {
+            duplicates.push({
+              empId,
+              name: targetEmployees[empId].name,
+              date: t1.toLocaleDateString('en-IN', { day: '2-digit', month: 'short' }),
+              time: t1.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true }),
+              detail: `Double ${dayLogs[i].direction} punch within ${Math.round((t2-t1)/1000)}s`
+            });
+          }
+        }
+
+        // First IN / Last OUT logic
+        let firstIn = null;
+        let lastOut = null;
+        let dayMs = 0;
+        let lastInTime = null;
+
+        dayLogs.forEach(log => {
+          const t = parseDBDate(log.timestamp);
+          if (log.direction === 'IN') {
+            lastInTime = t;
+            if (!firstIn) firstIn = t;
+          } else if ((log.direction === 'OUT' || log.direction === 'SYS_OUT') && lastInTime) {
+            dayMs += (t - lastInTime);
+            lastInTime = null;
+            lastOut = t;
+          }
+        });
+
+        // Auto-OUT missing out detection
+        const hasSysOut = dayLogs.some(log => log.direction === 'SYS_OUT');
+        if (hasSysOut) {
+          const sysOutLog = dayLogs.find(log => log.direction === 'SYS_OUT');
+          const t = parseDBDate(sysOutLog.timestamp);
+          missingOut.push({
+            empId,
+            name: targetEmployees[empId].name,
+            date: t.toLocaleDateString('en-IN', { day: '2-digit', month: 'short' }),
+            time: t.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true })
+          });
+        }
+
+        // Missing IN detection
+        if (dayLogs[0].direction === 'OUT' || dayLogs[0].direction === 'SYS_OUT') {
+          const t = parseDBDate(dayLogs[0].timestamp);
+          missingIn.push({
+            empId,
+            name: targetEmployees[empId].name,
+            date: t.toLocaleDateString('en-IN', { day: '2-digit', month: 'short' }),
+            time: t.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true })
+          });
+        }
+
+        // Ongoing check-in
+        if (lastInTime) {
+          const isToday = dateStr === new Date().toDateString();
+          const endTime = isToday ? new Date() : new Date(new Date(dateStr).setHours(23, 59, 59, 999));
+          dayMs += (endTime - lastInTime);
+          if (!lastOut) lastOut = endTime;
+        }
+
+        const workedHrs = dayMs / 1000 / 60 / 60;
+        employeeStats[empId].totalHours += workedHrs;
+        totalWorkedHoursSum += workedHrs;
+
+        if (dailyWorkedHours[dateStr]) {
+          dailyWorkedHours[dateStr].totalHours += workedHrs;
+          dailyWorkedHours[dateStr].count++;
+        }
+
+        // Overtime check (> 8.0 hours)
+        if (workedHrs > 8.0) {
+          totalOvertimeHours += (workedHrs - 8.0);
+        }
+
+        // Punctuality averages
+        if (firstIn) {
+          const arrivalMinutes = firstIn.getHours() * 60 + firstIn.getMinutes();
+          employeeStats[empId].firstInTimes.push(arrivalMinutes);
+          sumArrivalMinutes += arrivalMinutes;
+          countArrivals++;
+
+          // Late first IN (> 9:15 AM)
+          if (arrivalMinutes > 9 * 60 + 15) {
+            employeeStats[empId].lateCount++;
+            totalLateCount++;
+            if (dailyLateCounts[dateStr] !== undefined) {
+              dailyLateCounts[dateStr]++;
+            }
+          }
+        }
+
+        if (lastOut) {
+          const departureMinutes = lastOut.getHours() * 60 + lastOut.getMinutes();
+          sumDepartureMinutes += departureMinutes;
+          countDepartures++;
+
+          // Early departure (< 5:00 PM)
+          if (departureMinutes < 17 * 60) {
+            employeeStats[empId].earlyCount++;
+            totalEarlyDepartures++;
+          }
+        }
+      });
+    });
+
+    const avgArrivalMinutes = countArrivals > 0 ? (sumArrivalMinutes / countArrivals) : 0;
+    const avgArrHrs = Math.floor(avgArrivalMinutes / 60);
+    const avgArrMins = Math.floor(avgArrivalMinutes % 60);
+    const averageArrivalStr = countArrivals > 0 
+      ? `${avgArrHrs === 0 ? 12 : avgArrHrs > 12 ? avgArrHrs - 12 : avgArrHrs}:${avgArrMins.toString().padStart(2, '0')} ${avgArrHrs >= 12 ? 'PM' : 'AM'}`
+      : 'N/A';
+
+    const avgDepartureMinutes = countDepartures > 0 ? (sumDepartureMinutes / countDepartures) : 0;
+    const avgDepHrs = Math.floor(avgDepartureMinutes / 60);
+    const avgDepMins = Math.floor(avgDepartureMinutes % 60);
+    const averageDepartureStr = countDepartures > 0 
+      ? `${avgDepHrs === 0 ? 12 : avgDepHrs > 12 ? avgDepHrs - 12 : avgDepHrs}:${avgDepMins.toString().padStart(2, '0')} ${avgDepHrs >= 12 ? 'PM' : 'AM'}`
+      : 'N/A';
+
+    // Leaderboards
+    const allEmpList = Object.values(employeeStats);
+    
+    // Top 10 Punctual (lowest average arrival time)
+    const mostPunctual = allEmpList
+      .filter(x => x.firstInTimes.length > 0)
+      .map(x => {
+        const avg = x.firstInTimes.reduce((a, b) => a + b, 0) / x.firstInTimes.length;
+        const hrs = Math.floor(avg / 60);
+        const mins = Math.floor(avg % 60);
+        const valStr = `${hrs === 0 ? 12 : hrs > 12 ? hrs - 12 : hrs}:${mins.toString().padStart(2, '0')} ${hrs >= 12 ? 'PM' : 'AM'}`;
+        return { empId: x.empId, name: x.name, score: avg, valStr };
+      })
+      .sort((a, b) => a.score - b.score)
+      .slice(0, 10);
+
+    // Frequently Late (highest late count)
+    const frequentlyLate = allEmpList
+      .filter(x => x.lateCount > 0)
+      .map(x => ({ empId: x.empId, name: x.name, lateCount: x.lateCount }))
+      .sort((a, b) => b.lateCount - a.lateCount)
+      .slice(0, 10);
+
+    // Employees with zero attendance in range
+    const noAttendance = [];
+    Object.keys(targetEmployees).forEach(empId => {
+      const stats = employeeStats[empId];
+      if (!stats || stats.daysPresent === 0) {
+        noAttendance.push({
+          empId,
+          name: targetEmployees[empId].name,
+          department: targetEmployees[empId].department
+        });
+      }
+    });
+
+    // Leave count (toggled from employeeLeaves)
+    let leaveCount = 0;
+    Object.keys(employeeLeaves).forEach(empId => {
+      if (employeeLeaves[empId] && targetEmployees[empId]) {
+        leaveCount++;
+      }
+    });
+
+    // Present & Absent counts today (for summary cards)
+    const todayStr = currentTime.toDateString();
+    const presentTodayCount = dailyPresence[todayStr] ? dailyPresence[todayStr].size : 0;
+    const absentTodayCount = Math.max(0, totalDeptEmployees - presentTodayCount - leaveCount);
+    
+    // Average attendance percentage
+    const dates = Object.keys(dailyPresence);
+    let totalPresentRateSum = 0;
+    dates.forEach(d => {
+      const presCount = dailyPresence[d].size;
+      const rate = totalDeptEmployees > 0 ? (presCount / totalDeptEmployees) * 100 : 0;
+      totalPresentRateSum += rate;
+    });
+    const avgAttendanceRate = dates.length > 0 ? (totalPresentRateSum / dates.length) : 0;
+
+    // Late Arrivals Heatmap (Mon-Sun vs Hour Slots 8 AM - 12 PM+)
+    const heatmapData = Array.from({ length: 7 }, (_, day) => 
+      Array.from({ length: 5 }, (_, hourIdx) => ({
+        dayOfWeek: day,
+        hourSlot: 8 + hourIdx, // 8: 8AM-9AM, 9: 9AM-10AM, 10: 10AM-11AM, 11: 11AM-12PM, 12: 12PM+
+        count: 0
+      }))
+    );
+
+    rangeLogs.forEach(log => {
+      if (log.direction !== 'IN') return;
+      const t = parseDBDate(log.timestamp);
+      const day = t.getDay();
+      const hr = t.getHours();
+      
+      // Check if first-IN of that day for employee was late
+      const dateStr = t.toDateString();
+      const dayLogs = groupedLogs[log.employee_id] ? groupedLogs[log.employee_id][dateStr] : [];
+      if (dayLogs.length > 0) {
+        const sortedDay = [...dayLogs].sort((a,b) => parseDBDate(a.timestamp) - parseDBDate(b.timestamp));
+        if (sortedDay[0].log_id === log.log_id) { // is first IN of the day
+          const arrivalMinutes = t.getHours() * 60 + t.getMinutes();
+          if (arrivalMinutes > 9 * 60 + 15) { // late
+            let hrIdx = hr - 8;
+            if (hrIdx < 0) hrIdx = 0;
+            if (hrIdx > 4) hrIdx = 4;
+            heatmapData[day][hrIdx].count++;
+          }
+        }
+      }
+    });
+
+    return {
+      summary: {
+        totalEmployees: totalDeptEmployees,
+        presentToday: presentTodayCount,
+        absentToday: absentTodayCount,
+        leaveCount,
+        attendanceRate: avgAttendanceRate,
+        lateArrivals: totalLateCount,
+        earlyDepartures: totalEarlyDepartures,
+        averageArrivalStr,
+        averageDepartureStr,
+        totalOvertimeHours,
+        averageWorkingHours: totalPresenceRecords > 0 ? (totalWorkedHoursSum / totalPresenceRecords) : 0
+      },
+      leaderboard: {
+        mostPunctual,
+        frequentlyLate
+      },
+      workingHoursTrend: Object.entries(dailyWorkedHours).map(([dateStr, v]) => ({
+        dateStr,
+        avgHours: v.count > 0 ? (v.totalHours / v.count) : 0,
+        presentCount: v.count
+      })),
+      attendanceTrend: Object.entries(dailyPresence).map(([dateStr, set]) => ({
+        dateStr,
+        rate: totalDeptEmployees > 0 ? (set.size / totalDeptEmployees) * 100 : 0,
+        presentCount: set.size
+      })),
+      heatmap: heatmapData,
+      exceptions: {
+        missingIn,
+        missingOut,
+        duplicates,
+        noAttendance
+      },
+      employeeStats: allEmpList
+    };
+  }, [logs, employees, departmentFilter, employeeLeaves, analyticsDateScope, analyticsStartDate, analyticsEndDate, currentTime]);
+
+  // ==========================================
+  // 10. Pagination Calculators (useMemo)
   // ==========================================
   const totalLogsPages = useMemo(() => {
     return Math.ceil(filteredLogs.length / LOGS_PER_PAGE) || 1;
@@ -669,7 +1158,7 @@ export default function App() {
     }));
 
     logsFilteredBySearch.forEach(log => {
-      const d = new Date(log.timestamp);
+      const d = parseDBDate(log.timestamp);
       const h = d.getHours();
       const bucket = buckets.find(b => b.hour === h);
       if (bucket) {
@@ -698,7 +1187,7 @@ export default function App() {
       const uniqueEmps = new Set();
       
       logsFilteredBySearch.forEach(log => {
-        const logDate = new Date(log.timestamp);
+        const logDate = parseDBDate(log.timestamp);
         if (logDate.toDateString() === targetDate.toDateString() && log.direction === 'IN') {
           uniqueEmps.add(log.employee_id);
         }
@@ -709,6 +1198,120 @@ export default function App() {
 
     return list;
   }, [logsFilteredBySearch]);
+
+  // Calculate employee analytics for selectedProfileEmpId
+  const selectedEmployeeAnalytics = useMemo(() => {
+    if (!selectedProfileEmpId) return null;
+
+    // Get logs for this specific employee
+    const empLogs = processedLogs.filter(log => log.employee_id === selectedProfileEmpId);
+    
+    // Sort chronologically ascending
+    const sorted = [...empLogs].sort((a, b) => parseDBDate(a.timestamp) - parseDBDate(b.timestamp));
+
+    // Group logs by day
+    const logsByDay = {};
+    sorted.forEach(log => {
+      const dateStr = parseDBDate(log.timestamp).toDateString();
+      if (!logsByDay[dateStr]) logsByDay[dateStr] = [];
+      logsByDay[dateStr].push(log);
+    });
+
+    const daySummaries = [];
+    let totalWorkMs = 0;
+    let totalBreakMs = 0;
+    let daysPresentCount = Object.keys(logsByDay).length;
+    let onTimeDaysCount = 0;
+    let goalMetDaysCount = 0;
+
+    Object.keys(logsByDay).forEach(dateStr => {
+      const dayLogs = logsByDay[dateStr];
+      let dayWorkMs = 0;
+      let dayBreakMs = 0;
+      let firstInTime = null;
+      let lastPunchTime = null;
+      let lastInTime = null;
+
+      dayLogs.forEach(log => {
+        const time = parseDBDate(log.timestamp);
+        if (log.direction === 'IN') {
+          lastInTime = time;
+          if (!firstInTime) {
+            firstInTime = time;
+          }
+        } else if ((log.direction === 'OUT' || log.direction === 'SYS_OUT') && lastInTime) {
+          dayWorkMs += (time - lastInTime);
+          lastInTime = null;
+        }
+        lastPunchTime = time;
+      });
+
+      // Handle ongoing IN punch for today, or auto SYS_OUT completion for historical days
+      if (lastInTime) {
+        const isTodayStr = dateStr === new Date().toDateString();
+        const endTime = isTodayStr ? new Date() : new Date(new Date(dateStr).setHours(23, 59, 59, 999));
+        dayWorkMs += (endTime - lastInTime);
+        lastPunchTime = endTime;
+      }
+
+      // Calculate break time for this day
+      if (firstInTime && lastPunchTime) {
+        const totalSpan = lastPunchTime - firstInTime;
+        dayBreakMs = Math.max(0, totalSpan - dayWorkMs);
+      }
+
+      // Check on-time (first IN <= 9:15 AM)
+      let isOnTime = false;
+      if (firstInTime) {
+        const hours = firstInTime.getHours();
+        const minutes = firstInTime.getMinutes();
+        const arrivalMinutes = hours * 60 + minutes;
+        const targetMinutes = 9 * 60 + 15; // 09:15 AM
+        if (arrivalMinutes <= targetMinutes) {
+          isOnTime = true;
+          onTimeDaysCount++;
+        }
+      }
+
+      // Check goal met (work hours >= 7)
+      const hoursWorked = dayWorkMs / 1000 / 60 / 60;
+      const isGoalMet = hoursWorked >= 7;
+      if (isGoalMet) {
+        goalMetDaysCount++;
+      }
+
+      totalWorkMs += dayWorkMs;
+      totalBreakMs += dayBreakMs;
+
+      daySummaries.push({
+        dateStr,
+        firstIn: firstInTime ? firstInTime.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true }) : '—',
+        lastOut: lastInTime && dateStr === new Date().toDateString() ? 'Active IN' : (lastPunchTime ? lastPunchTime.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true }) : '—'),
+        hoursWorked,
+        breakHours: dayBreakMs / 1000 / 60 / 60,
+        isOnTime,
+        isGoalMet,
+        punchesCount: dayLogs.length
+      });
+    });
+
+    // Sort summaries descending (most recent first)
+    daySummaries.sort((a, b) => new Date(b.dateStr) - new Date(a.dateStr));
+
+    const avgWorkHours = daysPresentCount > 0 ? (totalWorkMs / 1000 / 60 / 60) / daysPresentCount : 0;
+    const avgBreakHours = daysPresentCount > 0 ? (totalBreakMs / 1000 / 60 / 60) / daysPresentCount : 0;
+    const goalComplianceRate = daysPresentCount > 0 ? (goalMetDaysCount / daysPresentCount) * 100 : 0;
+    const punctualityRate = daysPresentCount > 0 ? (onTimeDaysCount / daysPresentCount) * 100 : 0;
+
+    return {
+      daysPresentCount,
+      avgWorkHours,
+      avgBreakHours,
+      goalComplianceRate,
+      punctualityRate,
+      daySummaries
+    };
+  }, [selectedProfileEmpId, processedLogs, currentTime]);
 
   // Dynamic grid lines computed outside of JSX to follow Rules of Hooks
   const hourlyGridLines = useMemo(() => {
@@ -731,11 +1334,11 @@ export default function App() {
       return [];
     }
 
-    const sortedPunches = [...punchesToday].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+    const sortedPunches = [...punchesToday].sort((a, b) => parseDBDate(a.timestamp) - parseDBDate(b.timestamp));
 
-    const firstPunchTime = new Date(sortedPunches[0].timestamp);
+    const firstPunchTime = parseDBDate(sortedPunches[0].timestamp);
     const lastPunch = sortedPunches[sortedPunches.length - 1];
-    const lastPunchTime = lastPunch.direction === 'IN' ? currentTime : new Date(lastPunch.timestamp);
+    const lastPunchTime = lastPunch.direction === 'IN' ? currentTime : parseDBDate(lastPunch.timestamp);
 
     const defaultStart = new Date(currentTime);
     defaultStart.setHours(8, 0, 0, 0); // 8:00 AM
@@ -767,7 +1370,7 @@ export default function App() {
     let activeInTime = null;
 
     sortedPunches.forEach((punch) => {
-      const punchTime = new Date(punch.timestamp);
+      const punchTime = parseDBDate(punch.timestamp);
       if (punchTime < cursor) return;
 
       if (punch.direction === 'IN') {
@@ -806,37 +1409,6 @@ export default function App() {
   // ==========================================
   // 11. Upgraded Export Helpers & Handlers
   // ==========================================
-  
-  // Calculate boundary ISO strings
-  const getDateRangeBounds = (range, startInput, endInput) => {
-    const start = new Date();
-    const end = new Date();
-
-    if (range === 'today') {
-      start.setHours(0, 0, 0, 0);
-      end.setHours(23, 59, 59, 999);
-    } else if (range === 'yesterday') {
-      start.setDate(start.getDate() - 1);
-      start.setHours(0, 0, 0, 0);
-      end.setDate(end.getDate() - 1);
-      end.setHours(23, 59, 59, 999);
-    } else if (range === 'week') {
-      start.setDate(start.getDate() - 6);
-      start.setHours(0, 0, 0, 0);
-      end.setHours(23, 59, 59, 999);
-    } else if (range === 'custom') {
-      const s = new Date(startInput);
-      s.setHours(0, 0, 0, 0);
-      const e = new Date(endInput);
-      e.setHours(23, 59, 59, 999);
-      return { startISO: s.toISOString(), endISO: e.toISOString() };
-    }
-
-    return {
-      startISO: start.toISOString(),
-      endISO: end.toISOString()
-    };
-  };
 
   // Perform database query for requested date range
   const fetchExportData = async () => {
@@ -922,7 +1494,7 @@ export default function App() {
       };
     });
 
-    const sortedLogs = [...fetchedLogs].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+    const sortedLogs = [...fetchedLogs].sort((a, b) => parseDBDate(a.timestamp) - parseDBDate(b.timestamp));
     const groupedByEmployeeAndDay = {};
 
     sortedLogs.forEach(log => {
@@ -930,7 +1502,7 @@ export default function App() {
       if (!timesheet[empId]) return;
 
       timesheet[empId].punchesCount++;
-      const dateStr = new Date(log.timestamp).toDateString();
+      const dateStr = parseDBDate(log.timestamp).toDateString();
       timesheet[empId].daysPresent.add(dateStr);
 
       if (!groupedByEmployeeAndDay[empId]) groupedByEmployeeAndDay[empId] = {};
@@ -951,7 +1523,7 @@ export default function App() {
         let lastPunchTime = null;
 
         dayLogs.forEach(log => {
-          const time = new Date(log.timestamp);
+          const time = parseDBDate(log.timestamp);
           if (log.direction === 'IN') {
             lastInTime = time;
             if (!firstInTime) {
@@ -1081,7 +1653,7 @@ export default function App() {
       const headers = ["Log ID", "Employee ID", "Employee Name", "Direction", "Date", "Time"];
       const rows = fetchedLogs.map(log => {
         const emp = employees[log.employee_id] || { name: "Unknown Employee" };
-        const d = new Date(log.timestamp);
+        const d = parseDBDate(log.timestamp);
         const dateStr = d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
         const timeStr = d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true });
         
@@ -1140,7 +1712,6 @@ export default function App() {
     setExportSuccess(true);
     setTimeout(() => {
       setExportSuccess(false);
-      setIsExportModalOpen(false);
     }, 1200);
   };
 
@@ -1155,7 +1726,6 @@ export default function App() {
         setCopySuccess(true);
         setTimeout(() => {
           setCopySuccess(false);
-          setIsExportModalOpen(false);
         }, 1200);
       })
       .catch(err => {
@@ -1163,8 +1733,185 @@ export default function App() {
       });
   };
 
-  // Action: Print HTML report layout
-  const handlePrintPDFReport = async () => {
+  // Action: Export Multi-Sheet XLSX (SheetJS)
+  const handleExportXLSX = async () => {
+    try {
+      const fetchedLogs = await fetchExportData();
+      const timesheetList = compileTimesheetData(fetchedLogs);
+      
+      const { startISO, endISO } = getDateRangeBounds(exportDateRange, exportStartDate, exportEndDate);
+      const startStr = new Date(startISO).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+      const endStr = new Date(endISO).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+
+      // Sheet 1: Summary Dashboard
+      const deptEmployeesMap = {};
+      Object.entries(employees).forEach(([empId, emp]) => {
+        if (departmentFilter === 'All' || emp.department === departmentFilter) {
+          deptEmployeesMap[empId] = emp;
+        }
+      });
+      const totalScopedEmployees = Object.keys(deptEmployeesMap).length;
+
+      let totalLateCount = 0;
+      let totalEarlyDepartures = 0;
+      let sumArrivalMinutes = 0;
+      let countArrivals = 0;
+      let totalWorkedHours = 0;
+      let totalOvertimeHours = 0;
+      let totalDaysPresent = 0;
+
+      timesheetList.forEach(item => {
+        totalWorkedHours += item.totalHours;
+        totalDaysPresent += item.daysPresent.size;
+
+        const avgHours = item.daysPresent.size > 0 ? (item.totalHours / item.daysPresent.size) : 0;
+        if (avgHours > 8.0) {
+          totalOvertimeHours += (item.totalHours - (item.daysPresent.size * 8.0));
+        }
+
+        // Parse day logs to get first In & last Out
+        const empLogs = fetchedLogs.filter(l => l.employee_id === item.empId);
+        // Group by date
+        const dateGroups = {};
+        empLogs.forEach(log => {
+          const t = parseDBDate(log.timestamp);
+          const dStr = t.toDateString();
+          if (!dateGroups[dStr]) dateGroups[dStr] = [];
+          dateGroups[dStr].push(log);
+        });
+
+        Object.values(dateGroups).forEach(dayLogs => {
+          const sorted = [...dayLogs].sort((a,b) => parseDBDate(a.timestamp) - parseDBDate(b.timestamp));
+          const firstInLog = sorted.find(l => l.direction === 'IN');
+          const lastOutLog = [...sorted].reverse().find(l => l.direction === 'OUT' || l.direction === 'SYS_OUT');
+
+          if (firstInLog) {
+            const t = parseDBDate(firstInLog.timestamp);
+            const arrivalMinutes = t.getHours() * 60 + t.getMinutes();
+            sumArrivalMinutes += arrivalMinutes;
+            countArrivals++;
+            if (arrivalMinutes > 9 * 60 + 15) {
+              totalLateCount++;
+            }
+          }
+          if (lastOutLog) {
+            const t = parseDBDate(lastOutLog.timestamp);
+            const departureMinutes = t.getHours() * 60 + t.getMinutes();
+            if (departureMinutes < 17 * 60) {
+              totalEarlyDepartures++;
+            }
+          }
+        });
+      });
+
+      const avgArrivalMinutes = countArrivals > 0 ? (sumArrivalMinutes / countArrivals) : 0;
+      const avgArrHrs = Math.floor(avgArrivalMinutes / 60);
+      const avgArrMins = Math.floor(avgArrivalMinutes % 60);
+      const averageArrivalStr = countArrivals > 0 
+        ? `${avgArrHrs === 0 ? 12 : avgArrHrs > 12 ? avgArrHrs - 12 : avgArrHrs}:${avgArrMins.toString().padStart(2, '0')} ${avgArrHrs >= 12 ? 'PM' : 'AM'}`
+        : 'N/A';
+
+      const summaryData = [
+        ['DPI Attendance Analytics - Summary Report', ''],
+        ['Report Parameter', 'Value'],
+        ['Company Name', pdfCompanyName],
+        ['Department Scope', departmentFilter === 'All' ? 'All Departments' : departmentFilter],
+        ['Date Range', `${startStr} to ${endStr}`],
+        ['Generated On', new Date().toLocaleString('en-IN')],
+        ['', ''],
+        ['Workforce KPIs', ''],
+        ['Total Employees Scoped', totalScopedEmployees],
+        ['Total Working Days Present', totalDaysPresent],
+        ['Average First IN Time', averageArrivalStr],
+        ['Total Worked Hours', parseFloat(totalWorkedHours.toFixed(2))],
+        ['Total Overtime Hours', parseFloat(Math.max(0, totalOvertimeHours).toFixed(2))],
+        ['Total Late Arrivals (>9:15 AM)', totalLateCount],
+        ['Total Early Departures (<5:00 PM)', totalEarlyDepartures],
+      ];
+
+      // Sheet 2: Employee Metrics
+      const metricsHeaders = [
+        'Employee ID', 'Name', 'Department', 'Days Present', 'Punches Count', 
+        'Total Hours Worked', 'Total Break Hours', 'Avg Daily Hours', 'Goal Status'
+      ];
+      const metricsRows = timesheetList.map(item => {
+        const avgHours = item.daysPresent.size > 0 ? (item.totalHours / item.daysPresent.size) : 0;
+        const goalStatus = avgHours >= 7 ? 'Completed' : 'Incomplete';
+        return [
+          item.empId,
+          item.name,
+          employees[item.empId]?.department || 'N/A',
+          item.daysPresent.size,
+          item.punchesCount,
+          parseFloat(item.totalHours.toFixed(2)),
+          parseFloat((item.totalBreakHours || 0).toFixed(2)),
+          parseFloat(avgHours.toFixed(2)),
+          goalStatus
+        ];
+      });
+      const metricsData = [metricsHeaders, ...metricsRows];
+
+      // Sheet 3: Raw Logs
+      const logsHeaders = ['Log ID', 'Employee ID', 'Employee Name', 'Department', 'Timestamp', 'Direction', 'Device Code'];
+      const logsRows = fetchedLogs.map(log => {
+        const emp = employees[log.employee_id] || {};
+        const localTimeStr = parseDBDate(log.timestamp).toLocaleString('en-IN', { hour12: true });
+        return [
+          log.log_id,
+          log.employee_id,
+          emp.name || 'Unknown',
+          emp.department || 'N/A',
+          localTimeStr,
+          log.direction,
+          log.device_code || 'N/A'
+        ];
+      });
+      const logsData = [logsHeaders, ...logsRows];
+
+      // Create SheetJS workbook and sheets
+      const wb = XLSX.utils.book_new();
+
+      const wsSummary = XLSX.utils.aoa_to_sheet(summaryData);
+      const wsMetrics = XLSX.utils.aoa_to_sheet(metricsData);
+      const wsLogs = XLSX.utils.aoa_to_sheet(logsData);
+
+      // Auto-fit column widths
+      [wsSummary, wsMetrics, wsLogs].forEach(ws => {
+        const range = XLSX.utils.decode_range(ws['!ref'] || 'A1:A1');
+        const cols = [];
+        for (let C = range.s.c; C <= range.e.c; ++C) {
+          let maxLen = 10;
+          for (let R = range.s.r; R <= range.e.r; ++R) {
+            const cell = ws[XLSX.utils.encode_cell({ r: R, c: C })];
+            if (cell && cell.v) {
+              const len = cell.v.toString().length;
+              if (len > maxLen) maxLen = len;
+            }
+          }
+          cols.push({ wch: maxLen + 2 });
+        }
+        ws['!cols'] = cols;
+      });
+
+      XLSX.utils.book_append_sheet(wb, wsSummary, 'Summary Overview');
+      XLSX.utils.book_append_sheet(wb, wsMetrics, 'Employee Metrics');
+      XLSX.utils.book_append_sheet(wb, wsLogs, 'Raw Logs');
+
+      // Write to file
+      XLSX.writeFile(wb, `biometric_analytics_${departmentFilter.toLowerCase()}_${new Date().toISOString().slice(0, 10)}.xlsx`);
+
+      setExportSuccess(true);
+      setTimeout(() => {
+    }, 1200);
+  } catch (err) {
+    console.error('XLSX export failed:', err);
+  }
+};
+
+// Action: Download PDF Report
+const handleDownloadPDFReport = async () => {
+  setIsFetchingExportData(true);
+  try {
     const fetchedLogs = await fetchExportData();
     const timesheetList = compileTimesheetData(fetchedLogs);
     const { startISO, endISO } = getDateRangeBounds(exportDateRange, exportStartDate, exportEndDate);
@@ -1172,49 +1919,65 @@ export default function App() {
     const startStr = new Date(startISO).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
     const endStr = new Date(endISO).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
 
-    const printWindow = window.open('', '_blank');
-    if (!printWindow) {
-      alert("Popup blocked! Please allow popups to generate print layouts.");
-      return;
-    }
+    // Set colors according to selected theme
+    const themes = {
+      slate: { primary: '#475569', accent: '#f8fafc', border: '#cbd5e1' },
+      blue: { primary: '#1d4ed8', accent: '#eff6ff', border: '#bfdbfe' },
+      emerald: { primary: '#047857', accent: '#ecfdf5', border: '#a7f3d0' },
+      indigo: { primary: '#4338ca', accent: '#eef2ff', border: '#c7d2fe' }
+    };
+    const activeTheme = themes[pdfThemeColor] || themes.blue;
+
+    const logoHtml = `
+      <img src="/dpi.png" alt="DPI Logo" style="width: 28px; height: 28px; object-fit: contain; vertical-align: middle;" />
+    `;
 
     let title = '';
     let contentHtml = '';
 
     if (exportReportType === 'logs') {
-      title = 'Detailed Biometric Punch Logs Report';
+      title = 'Detailed Biometric Punch Logs';
       const logChunks = chunkArray(fetchedLogs, 20);
 
+      // Determine log headers to render
+      const headers = [];
+      if (pdfLogColumns.logId) headers.push('<th>Log ID</th>');
+      if (pdfLogColumns.empId) headers.push('<th>Employee ID</th>');
+      if (pdfLogColumns.empName) headers.push('<th>Employee Name</th>');
+      if (pdfLogColumns.direction) headers.push('<th>Direction</th>');
+      if (pdfLogColumns.date) headers.push('<th>Date</th>');
+      if (pdfLogColumns.time) headers.push('<th>Time</th>');
+      const headersHtml = `<tr>${headers.join('')}</tr>`;
+
       contentHtml = logChunks.map((chunk, index) => {
+        const rowsHtml = chunk.map(log => {
+          const emp = employees[log.employee_id] || { name: 'Unknown Employee' };
+          const d = parseDBDate(log.timestamp);
+          
+          const cells = [];
+          if (pdfLogColumns.logId) cells.push(`<td>${log.log_id}</td>`);
+          if (pdfLogColumns.empId) cells.push(`<td>${log.employee_id}</td>`);
+          if (pdfLogColumns.empName) cells.push(`<td><strong>${emp.name}</strong></td>`);
+          if (pdfLogColumns.direction) {
+            cells.push(`
+              <td>
+                <span class="badge ${log.direction === 'IN' ? 'badge-in' : log.direction === 'SYS_OUT' ? 'badge-sys-out' : 'badge-out'}">${log.direction === 'SYS_OUT' ? 'SYS OUT' : log.direction}</span>
+              </td>
+            `);
+          }
+          if (pdfLogColumns.date) cells.push(`<td>${d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}</td>`);
+          if (pdfLogColumns.time) cells.push(`<td>${d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })}</td>`);
+          
+          return `<tr>${cells.join('')}</tr>`;
+        }).join('');
+
         const tableHtml = `
           <table class="report-table">
             <thead>
-              <tr>
-                <th>Log ID</th>
-                <th>Employee ID</th>
-                <th>Employee Name</th>
-                <th>Direction</th>
-                <th>Date</th>
-                <th>Time</th>
-              </tr>
+              ${headersHtml}
             </thead>
             <tbody>
-              ${chunk.map(log => {
-                const emp = employees[log.employee_id] || { name: 'Unknown Employee' };
-                const d = new Date(log.timestamp);
-                return `
-                  <tr>
-                    <td>${log.log_id}</td>
-                    <td>${log.employee_id}</td>
-                    <td><strong>${emp.name}</strong></td>
-                    <td>
-                      <span class="badge ${log.direction === 'IN' ? 'badge-in' : log.direction === 'SYS_OUT' ? 'badge-sys-out' : 'badge-out'}">${log.direction === 'SYS_OUT' ? 'SYS OUT' : log.direction}</span>
-                    </td>
-                    <td>${d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}</td>
-                    <td>${d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })}</td>
-                  </tr>
-                `;
-              }).join('')}
+              ${rowsHtml}
             </tbody>
           </table>
         `;
@@ -1222,9 +1985,12 @@ export default function App() {
         return `
           <div class="page-container">
             <div class="header">
-              <div>
-                <h1 class="title">${title}</h1>
-                <div class="subtitle">DPI Attendance Monitoring Dashboard</div>
+              <div style="display: flex; align-items: center; gap: 10px;">
+                ${logoHtml}
+                <div>
+                  <h1 class="title">${pdfCompanyName}</h1>
+                  <div class="subtitle">${title}</div>
+                </div>
               </div>
               <div class="meta-info">
                 <div><strong>Report Range:</strong> ${startStr} - ${endStr}</div>
@@ -1239,7 +2005,7 @@ export default function App() {
             
             <div class="footer">
               <div>
-                <p style="font-size: 9px; color: #94a3b8; margin: 0;">This is an automated biometric report synced directly from cloud logs.</p>
+                <p style="font-size: 9px; color: #94a3b8; margin: 0; max-width: 400px; line-height: 1.3;">${pdfComments}</p>
               </div>
               <div class="signature-box">
                 Authorized Signature
@@ -1249,47 +2015,57 @@ export default function App() {
         `;
       }).join('');
     } else {
-      title = 'Workforce Timesheet & Compliance Report';
-      const timesheetChunks = chunkArray(timesheetList, 20);
+      title = 'Workforce Attendance Timesheet';
+      const timesheetChunks = chunkArray(timesheetList, 15);
+
+      // Determine timesheet headers to render
+      const headers = [];
+      if (pdfTimesheetColumns.empId) headers.push('<th>Employee ID</th>');
+      if (pdfTimesheetColumns.empName) headers.push('<th>Employee Name</th>');
+      if (pdfTimesheetColumns.daysPresent) headers.push('<th>Days Present</th>');
+      if (pdfTimesheetColumns.punchesCount) headers.push('<th>Total Punches</th>');
+      if (pdfTimesheetColumns.totalHours) headers.push('<th>Total Hours Worked</th>');
+      if (pdfTimesheetColumns.totalBreakHours) headers.push('<th>Total Break Hours</th>');
+      if (pdfTimesheetColumns.avgDailyHours) headers.push('<th>Avg Daily Hours</th>');
+      if (pdfTimesheetColumns.goalStatus) headers.push('<th>Shift Goal Status</th>');
+      const headersHtml = `<tr>${headers.join('')}</tr>`;
 
       contentHtml = timesheetChunks.map((chunk, index) => {
+        const rowsHtml = chunk.map(item => {
+          const rawTotalMins = item.totalMins || 0;
+          const formattedTotalHours = `${Math.floor(rawTotalMins / 60)}h ${Math.round(rawTotalMins % 60)}m`;
+          const rawBreakMins = item.breakMins || 0;
+          const formattedBreakHours = `${Math.floor(rawBreakMins / 60)}h ${Math.round(rawBreakMins % 60)}m`;
+          const rawAvgMins = item.avgMins || 0;
+          const formattedAvgHours = `${Math.floor(rawAvgMins / 60)}h ${Math.round(rawAvgMins % 60)}m`;
+          
+          const cells = [];
+          if (pdfTimesheetColumns.empId) cells.push(`<td>${item.empId}</td>`);
+          if (pdfTimesheetColumns.empName) cells.push(`<td><strong>${item.name}</strong></td>`);
+          if (pdfTimesheetColumns.daysPresent) cells.push(`<td>${item.daysPresent.size}</td>`);
+          if (pdfTimesheetColumns.punchesCount) cells.push(`<td>${item.punchesCount}</td>`);
+          if (pdfTimesheetColumns.totalHours) cells.push(`<td>${formattedTotalHours}</td>`);
+          if (pdfTimesheetColumns.totalBreakHours) cells.push(`<td>${formattedBreakHours}</td>`);
+          if (pdfTimesheetColumns.avgDailyHours) cells.push(`<td>${formattedAvgHours}</td>`);
+          if (pdfTimesheetColumns.goalStatus) {
+            const meetsGoal = item.meetsGoal;
+            cells.push(`
+              <td>
+                <span class="badge ${meetsGoal ? 'badge-in' : 'badge-out'}">${meetsGoal ? 'MEETS GOAL' : 'BELOW GOAL'}</span>
+              </td>
+            `);
+          }
+          
+          return `<tr>${cells.join('')}</tr>`;
+        }).join('');
+
         const tableHtml = `
           <table class="report-table">
             <thead>
-              <tr>
-                <th>Employee ID</th>
-                <th>Employee Name</th>
-                <th>Days Present</th>
-                <th>Total Punches</th>
-                <th>Total Hours Worked</th>
-                <th>Total Break Hours</th>
-                <th>Avg Daily Hours</th>
-                <th>Shift Goal Status</th>
-              </tr>
+              ${headersHtml}
             </thead>
             <tbody>
-              ${chunk.map(item => {
-                const avgHours = item.daysPresent.size > 0 ? (item.totalHours / item.daysPresent.size) : 0;
-                const goalStatus = avgHours >= 7 ? 'Completed' : 'Incomplete';
-                const formattedTotalHours = `${Math.floor(item.totalHours)}h ${Math.round((item.totalHours % 1) * 60)}m`;
-                const formattedBreakHours = `${Math.floor(item.totalBreakHours || 0)}h ${Math.round(((item.totalBreakHours || 0) % 1) * 60)}m`;
-                const formattedAvgHours = `${Math.floor(avgHours)}h ${Math.round((avgHours % 1) * 60)}m`;
-                
-                return `
-                  <tr>
-                    <td>${item.empId}</td>
-                    <td><strong>${item.name}</strong></td>
-                    <td>${item.daysPresent.size}</td>
-                    <td>${item.punchesCount}</td>
-                    <td>${formattedTotalHours}</td>
-                    <td>${formattedBreakHours}</td>
-                    <td>${formattedAvgHours}</td>
-                    <td>
-                      <span class="badge ${goalStatus === 'Completed' ? 'badge-in' : 'badge-out'}">${goalStatus}</span>
-                    </td>
-                  </tr>
-                `;
-              }).join('')}
+              ${rowsHtml}
             </tbody>
           </table>
         `;
@@ -1297,9 +2073,12 @@ export default function App() {
         return `
           <div class="page-container">
             <div class="header">
-              <div>
-                <h1 class="title">${title}</h1>
-                <div class="subtitle">DPI Attendance Monitoring Dashboard</div>
+              <div style="display: flex; align-items: center; gap: 10px;">
+                ${logoHtml}
+                <div>
+                  <h1 class="title">${pdfCompanyName}</h1>
+                  <div class="subtitle">${title}</div>
+                </div>
               </div>
               <div class="meta-info">
                 <div><strong>Report Range:</strong> ${startStr} - ${endStr}</div>
@@ -1314,7 +2093,7 @@ export default function App() {
             
             <div class="footer">
               <div>
-                <p style="font-size: 9px; color: #94a3b8; margin: 0;">This is an automated biometric report synced directly from cloud logs.</p>
+                <p style="font-size: 9px; color: #94a3b8; margin: 0; max-width: 400px; line-height: 1.3;">${pdfComments}</p>
               </div>
               <div class="signature-box">
                 Authorized Signature
@@ -1325,69 +2104,123 @@ export default function App() {
       }).join('');
     }
 
-    printWindow.document.write(`
-      <html>
-        <head>
-          <title>${title}</title>
-          <style>
-            @page { size: auto; margin: 0; }
-            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; color: #1e293b; margin: 0; padding: 0; line-height: 1.5; }
-            
-            .page-container {
-              page-break-after: always;
-              break-after: page;
-              box-sizing: border-box;
-              padding: 15mm 20mm;
-              height: 100vh;
-              display: flex;
-              flex-direction: column;
-              justify-content: space-between;
-            }
+    const styles = `
+      <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; color: #1e293b; margin: 0; padding: 0; line-height: 1.5; background: #ffffff; }
+        .page-container {
+          box-sizing: border-box;
+          padding: 15mm 20mm;
+          height: 1123px;
+          width: 794px;
+          display: flex;
+          flex-direction: column;
+          justify-content: space-between;
+          background: #ffffff;
+          border-bottom: 1px dashed #e2e8f0;
+        }
+        .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid ${activeTheme.border}; padding-bottom: 12px; margin-bottom: 12px; }
+        .title { font-size: 16px; font-weight: 800; color: ${activeTheme.primary}; margin: 0; }
+        .subtitle { font-size: 10px; color: #64748b; margin-top: 2px; text-transform: uppercase; letter-spacing: 0.05em; font-weight: bold; }
+        .meta-info { text-align: right; font-size: 9px; color: #475569; line-height: 1.4; }
+        .main-content { flex-grow: 1; }
+        table.report-table { width: 100%; border-collapse: collapse; margin-bottom: 12px; }
+        table.report-table th { background: ${activeTheme.accent}; font-size: 10px; font-weight: 800; text-transform: uppercase; color: ${activeTheme.primary}; text-align: left; padding: 8px 10px; border-bottom: 2px solid ${activeTheme.border}; }
+        table.report-table td { font-size: 10px; padding: 7px 10px; border-bottom: 1px solid #e2e8f0; }
+        table.report-table tr:nth-child(even) { background: #f8fafc; }
+        .badge { display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 9px; font-weight: bold; text-transform: uppercase; }
+        .badge-in { background: #dcfce7; color: #15803d; border: 1px solid #bbf7d0; }
+        .badge-sys-out { background: #f3e8ff; color: #6b21a8; border: 1px solid #e9d5ff; }
+        .badge-out { background: #ffe4e6; color: #b91c1c; border: 1px solid #fecdd3; }
+        .footer { border-top: 1px solid #e2e8f0; padding-top: 12px; display: flex; justify-content: space-between; align-items: flex-end; margin-top: auto; }
+        .signature-box { width: 180px; text-align: center; border-top: 1px solid ${activeTheme.primary}; padding-top: 8px; font-size: 10px; color: #64748b; font-weight: bold; }
+      </style>
+    `;
 
-            .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #e2e8f0; padding-bottom: 12px; margin-bottom: 12px; }
-            .title { font-size: 18px; font-weight: bold; color: #0f172a; margin: 0; }
-            .subtitle { font-size: 10px; color: #64748b; margin-top: 4px; text-transform: uppercase; letter-spacing: 0.05em; font-weight: bold; }
-            .meta-info { text-align: right; font-size: 10px; color: #475569; line-height: 1.4; }
-            
-            .main-content { flex-grow: 1; }
-            table.report-table { width: 100%; border-collapse: collapse; margin-bottom: 12px; }
-            table.report-table th { background: #f1f5f9; font-size: 10px; font-weight: bold; text-transform: uppercase; color: #475569; text-align: left; padding: 8px 10px; border-bottom: 2px solid #cbd5e1; }
-            table.report-table td { font-size: 10px; padding: 7px 10px; border-bottom: 1px solid #e2e8f0; }
-            table.report-table tr:nth-child(even) { background: #f8fafc; }
-            table.report-table tr { page-break-inside: avoid; }
-            
-            .badge { display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 9px; font-weight: bold; text-transform: uppercase; }
-            .badge-in { background: #dcfce7; color: #15803d; border: 1px solid #bbf7d0; }
-            .badge-sys-out { background: #f3e8ff; color: #6b21a8; border: 1px solid #e9d5ff; }
-            .badge-out { background: #ffe4e6; color: #b91c1c; border: 1px solid #fecdd3; }
-            
-            .footer { border-top: 1px solid #e2e8f0; padding-top: 12px; display: flex; justify-content: space-between; align-items: flex-end; margin-top: auto; }
-            .signature-box { width: 180px; text-align: center; border-top: 1px solid #94a3b8; padding-top: 8px; font-size: 10px; color: #64748b; font-weight: bold; }
-          </style>
-        </head>
-        <body>
-          ${contentHtml}
-        </body>
-      </html>
-    `);
-    printWindow.document.close();
-    printWindow.focus();
+    // Set HTML content to state to render in the hidden container
+    setPdfReportHtml(`${styles}<div>${contentHtml}</div>`);
     
-    setTimeout(() => {
-      printWindow.print();
-      printWindow.close();
-    }, 500);
+    // Trigger the canvas compiler in next tick
+    setTimeout(async () => {
+      try {
+        const element = document.getElementById('pdf-report-render-target');
+        if (!element) {
+          console.error('Render target element not found');
+          setIsFetchingExportData(false);
+          return;
+        }
 
-    setExportSuccess(true);
-    setTimeout(() => {
-      setExportSuccess(false);
-      setIsExportModalOpen(false);
-    }, 1200);
-  };
+        setIsGeneratingPDF(true);
+
+        const canvas = await html2canvas(element, {
+          scale: 2,
+          useCORS: true,
+          logging: false,
+          backgroundColor: '#ffffff'
+        });
+
+        const imgData = canvas.toDataURL('image/jpeg', 0.95);
+        const pdf = new jsPDF('p', 'mm', 'a4');
+        const pdfWidth = pdf.internal.pageSize.getWidth();
+        const pdfHeight = pdf.internal.pageSize.getHeight();
+
+        const pageCanvasHeight = (canvas.width * pdfHeight) / pdfWidth;
+        let heightLeft = canvas.height;
+        let sY = 0;
+        let isFirstPage = true;
+
+        while (heightLeft > 0) {
+          if (!isFirstPage) {
+            pdf.addPage();
+          }
+          isFirstPage = false;
+
+          const pageCanvas = document.createElement('canvas');
+          pageCanvas.width = canvas.width;
+          pageCanvas.height = Math.min(pageCanvasHeight, heightLeft);
+
+          const ctx = pageCanvas.getContext('2d');
+          ctx.drawImage(
+            canvas,
+            0, sY, canvas.width, pageCanvas.height,
+            0, 0, pageCanvas.width, pageCanvas.height
+          );
+
+          const pageImgData = pageCanvas.toDataURL('image/jpeg', 0.95);
+          const currentPdfPageHeight = (pageCanvas.height * pdfWidth) / canvas.width;
+
+          pdf.addImage(pageImgData, 'JPEG', 0, 0, pdfWidth, currentPdfPageHeight);
+
+          sY += pageCanvasHeight;
+          heightLeft -= pageCanvasHeight;
+        }
+
+        const fileName = `${pdfCompanyName.replace(/[^a-z0-9]/gi, '_').toLowerCase()}_report_${new Date().toISOString().slice(0, 10)}.pdf`;
+        pdf.save(fileName);
+
+        setExportSuccess(true);
+        setTimeout(() => {
+          setExportSuccess(false);
+        }, 1200);
+      } catch (canvasErr) {
+        console.error('Error compiling PDF canvas:', canvasErr);
+      } finally {
+        setIsGeneratingPDF(false);
+        setPdfReportHtml(null);
+        setIsFetchingExportData(false);
+      }
+    }, 600);
+
+  } catch (err) {
+    console.error('PDF export failed:', err);
+    setIsFetchingExportData(false);
+    setIsGeneratingPDF(false);
+    setPdfReportHtml(null);
+  }
+};
 
   // Formatting utilities
   const formatTimeStr = (isoString) => {
-    const d = new Date(isoString);
+    const d = parseDBDate(isoString);
     return d.toLocaleTimeString('en-IN', {
       hour: '2-digit',
       minute: '2-digit',
@@ -1397,7 +2230,7 @@ export default function App() {
   };
 
   const formatDateStr = (isoString) => {
-    const d = new Date(isoString);
+    const d = parseDBDate(isoString);
     return d.toLocaleDateString('en-IN', {
       day: '2-digit',
       month: 'short',
@@ -1414,62 +2247,188 @@ export default function App() {
     });
   };
 
+  if (isInitializing) {
+    return (
+      <div className="min-h-screen bg-slate-900 flex flex-col items-center justify-center p-4">
+        <div className="flex flex-col items-center max-w-sm text-center space-y-6 animate-in fade-in duration-700">
+          <div className="relative">
+            {/* Outer spinning ring */}
+            <div className="h-20 w-20 rounded-full border-4 border-slate-800 border-t-blue-500 animate-spin"></div>
+            {/* Inner pulsing icon */}
+            <div className="absolute inset-0 flex items-center justify-center">
+              <Fingerprint className="h-8 w-8 text-blue-500 animate-pulse" />
+            </div>
+          </div>
+          <div className="space-y-2">
+            <h2 className="text-white font-extrabold text-xl tracking-tight">DPI Biometric Attendance</h2>
+            <p className="text-slate-400 text-xs font-semibold uppercase tracking-widest animate-pulse">
+              Initializing Secure Connection...
+            </p>
+          </div>
+          <div className="w-48 bg-slate-800 h-1.5 rounded-full overflow-hidden">
+            <div className="bg-blue-500 h-full w-full rounded-full animate-pulse"></div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return (
+      <div className="min-h-screen bg-slate-900 flex flex-col justify-center py-12 sm:px-6 lg:px-8">
+        <div className="sm:mx-auto sm:w-full sm:max-w-md flex flex-col items-center">
+          <div className="bg-white p-2 rounded-2xl shadow-xl mb-4 border border-slate-700 w-16 h-16 flex items-center justify-center shrink-0 animate-bounce">
+            <img src="/dpi.png" alt="DPI Logo" className="h-12 w-12 object-contain" />
+          </div>
+          <h2 className="text-center text-2xl font-black tracking-tight text-white">
+            Sign in to DPI Attendance
+          </h2>
+          <p className="mt-1 text-center text-xs text-slate-400 font-medium">
+            Enter administrative credentials to access the radar dashboard
+          </p>
+        </div>
+
+        <div className="mt-8 sm:mx-auto sm:w-full sm:max-w-md">
+          <div className="bg-slate-800 border border-slate-700 shadow-2xl rounded-2xl p-6 sm:p-10 space-y-6">
+            {loginError && (
+              <div className="bg-rose-500/10 border border-rose-500/25 text-rose-350 p-3 rounded-lg text-xs font-bold flex items-center gap-2">
+                <AlertTriangle className="h-4 w-4 shrink-0" />
+                <span>{loginError}</span>
+              </div>
+            )}
+
+            <form className="space-y-5" onSubmit={handleLogin}>
+              <div>
+                <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1.5">
+                  Username
+                </label>
+                <div className="relative">
+                  <input
+                    type="text"
+                    required
+                    value={loginUsername}
+                    onChange={(e) => setLoginUsername(e.target.value)}
+                    placeholder="Enter username"
+                    className="w-full bg-slate-850 border border-slate-700 rounded-xl px-3.5 py-2.5 text-xs font-semibold text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-all font-mono"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1.5">
+                  Password
+                </label>
+                <div className="relative">
+                  <input
+                    type="password"
+                    required
+                    value={loginPassword}
+                    onChange={(e) => setLoginPassword(e.target.value)}
+                    placeholder="••••••••"
+                    className="w-full bg-slate-850 border border-slate-700 rounded-xl px-3.5 py-2.5 text-xs font-semibold text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-all font-mono"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <button
+                  type="submit"
+                  className="w-full flex justify-center py-2.5 px-4 border border-transparent rounded-xl shadow-md text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition-colors cursor-pointer"
+                >
+                  Sign In
+                </button>
+              </div>
+            </form>
+
+            <div className="text-center pt-2 border-t border-slate-700/80">
+              <p className="text-[9px] font-bold uppercase tracking-wider text-slate-500">
+                Secured Dashboard System
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-slate-50 font-sans antialiased text-slate-800 flex flex-col">
       {/* Header Section */}
       <header className="bg-white border-b border-slate-200 sticky top-0 z-50 shadow-sm">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3 flex flex-col sm:flex-row items-center justify-between gap-3 sm:gap-4">
-          
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 sm:gap-4">
           {/* Logo & Subtitle */}
-          <div className="flex items-center space-x-3 w-full sm:w-auto">
-            <div className="bg-blue-600 p-2 rounded-xl shadow-md text-white shrink-0">
-              <Fingerprint className="h-5 w-5" />
+          <div className="flex items-center justify-between w-full sm:w-auto">
+            <div className="flex items-center space-x-3">
+              <div className="bg-white p-1 rounded-xl shadow-md border border-slate-200 shrink-0 w-9 h-9 flex items-center justify-center">
+                <img src="/dpi.png" alt="DPI Logo" className="h-7 w-7 object-contain" />
+              </div>
+              <div>
+                <h1 className="text-sm sm:text-base md:text-lg font-bold text-slate-900 tracking-tight leading-tight">
+                  Biometric Attendance Radar
+                </h1>
+                <div className="flex items-center gap-1.5 mt-0.5">
+                  <span className="text-[9px] sm:text-[10px] text-slate-400 font-semibold uppercase tracking-wider">Live Webhook Monitor</span>
+                  <span className="text-slate-350 text-[10px]">•</span>
+                  {isSupabaseMode ? (
+                    <span className="inline-flex items-center gap-1 text-[9px] font-bold text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded-full border border-emerald-100">
+                      <span className="relative flex h-1.5 w-1.5">
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                        <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500"></span>
+                      </span>
+                      Live
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 text-[9px] font-bold text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded-full border border-amber-100">
+                      <span className="h-1.5 w-1.5 rounded-full bg-amber-500"></span>
+                      Offline
+                    </span>
+                  )}
+                </div>
+              </div>
             </div>
-            <div>
-              <h1 className="text-[15px] sm:text-lg font-bold text-slate-900 tracking-tight">
-                Biometric Attendance Radar
-              </h1>
-              <p className="text-[9px] sm:text-[10px] text-slate-400 font-semibold uppercase tracking-wider">Live Webhook Monitor</p>
-            </div>
+            
+            {/* Mobile Log Out Icon Button */}
+            <button
+              onClick={handleLogout}
+              className="sm:hidden flex items-center justify-center p-2 rounded-xl text-slate-500 hover:text-slate-700 bg-slate-50 hover:bg-slate-100 border border-slate-200 transition-colors shadow-sm cursor-pointer"
+              title="Log Out"
+            >
+              <UserX className="h-4 w-4" />
+            </button>
           </div>
 
           {/* Controls & Connection Status */}
-          <div className="grid grid-cols-2 sm:flex sm:items-center gap-2 sm:gap-3 w-full sm:w-auto">
-            
-            {/* Clock */}
-            <div className="col-span-2 sm:col-span-auto flex items-center justify-center space-x-2 bg-slate-100 px-3 py-1.5 rounded-lg border border-slate-200 text-slate-700 text-xs font-semibold">
-              <Clock className="h-3.5 w-3.5 text-slate-500" />
-              <span>{currentTime.toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' })}</span>
-              <span className="text-slate-300">|</span>
-              <span className="font-mono text-slate-950">
-                {currentTime.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })}
-              </span>
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 sm:gap-3 w-full sm:w-auto">
+            {/* Clock & Sync Row on Mobile */}
+            <div className="flex items-center gap-2 w-full sm:w-auto">
+              {/* Clock */}
+              <div className="flex-1 sm:flex-initial flex items-center justify-center space-x-2 bg-slate-50 px-3 py-1.5 rounded-xl border border-slate-200 text-slate-700 text-xs font-semibold shadow-sm">
+                <Clock className="h-3.5 w-3.5 text-slate-400" />
+                <span className="hidden xs:inline">{currentTime.toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' })}</span>
+                <span className="hidden xs:inline text-slate-300">|</span>
+                <span className="font-mono text-slate-950">
+                  {currentTime.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })}
+                </span>
+              </div>
+
+              {/* Sync Now Action */}
+              <button
+                onClick={triggerManualRefresh}
+                disabled={isLoadingData}
+                className="flex-1 sm:flex-initial flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-50 transition-colors shadow-md shadow-blue-200/50 cursor-pointer h-[34px]"
+              >
+                <RefreshCw className={`h-3.5 w-3.5 shrink-0 ${isLoadingData ? 'animate-spin' : ''}`} />
+                <span>Sync Now</span>
+              </button>
             </div>
 
-            {/* Connection Indicator */}
-            {isSupabaseMode ? (
-              <span className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
-                <span className="relative flex h-2 w-2 shrink-0">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                  <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
-                </span>
-                Connected
-              </span>
-            ) : (
-              <span className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-amber-50 text-amber-700 border border-amber-200">
-                <span className="h-2 w-2 rounded-full bg-amber-500 shrink-0"></span>
-                Offline
-              </span>
-            )}
-
-            {/* Sync Now Action */}
+            {/* Desktop Log Out Action */}
             <button
-              onClick={triggerManualRefresh}
-              disabled={isLoadingData}
-              className="flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 transition-colors shadow-sm cursor-pointer"
+              onClick={handleLogout}
+              className="hidden sm:flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-slate-50 hover:bg-slate-100 text-slate-700 transition-colors border border-slate-200 shadow-sm cursor-pointer"
             >
-              <RefreshCw className={`h-3.5 w-3.5 shrink-0 ${isLoadingData ? 'animate-spin' : ''}`} />
-              <span>Sync Now</span>
+              <UserX className="h-3.5 w-3.5 shrink-0 text-slate-500" />
+              <span>Log Out</span>
             </button>
           </div>
         </div>
@@ -1492,79 +2451,91 @@ export default function App() {
         )}
 
         {/* Unified Tab Navigation & Filter Bar */}
-        <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm flex flex-col sm:flex-row items-center justify-between gap-4">
-          <div className="flex items-center space-x-5 border-b sm:border-b-0 w-full sm:w-auto pb-2.5 sm:pb-0 overflow-x-auto whitespace-nowrap scrollbar-none">
-            <button 
-              onClick={() => setActiveTab('logs')}
-              className={`text-xs font-bold pb-2 border-b-2 transition-all cursor-pointer shrink-0 ${
-                activeTab === 'logs' 
-                  ? 'border-blue-600 text-blue-600' 
-                  : 'border-transparent text-slate-500 hover:text-slate-700'
-              }`}
-            >
-              🕒 Live Punch Logs
-            </button>
-            <button 
-              onClick={() => setActiveTab('presence')}
-              className={`text-xs font-bold pb-2 border-b-2 transition-all cursor-pointer shrink-0 ${
-                activeTab === 'presence' 
-                  ? 'border-blue-600 text-blue-600' 
-                  : 'border-transparent text-slate-500 hover:text-slate-700'
-              }`}
-            >
-              👥 Presence & Shift Board
-            </button>
-            <button 
-              onClick={() => setActiveTab('export')}
-              className={`text-xs font-bold pb-2 border-b-2 transition-all cursor-pointer shrink-0 ${
-                activeTab === 'export' 
-                  ? 'border-blue-600 text-blue-600' 
-                  : 'border-transparent text-slate-500 hover:text-slate-700'
-              }`}
-            >
-              📊 Reports & Export Hub
-            </button>
+        <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm flex flex-col gap-4">
+          {/* Tab Navigation */}
+          <div className="flex items-center justify-between border-b border-slate-100 pb-2 w-full overflow-x-auto whitespace-nowrap scrollbar-none">
+            <div className="flex items-center space-x-6">
+              <button 
+                onClick={() => setActiveTab('logs')}
+                className={`text-xs font-bold pb-2 border-b-2 transition-all cursor-pointer shrink-0 ${
+                  activeTab === 'logs' 
+                    ? 'border-blue-600 text-blue-600' 
+                    : 'border-transparent text-slate-500 hover:text-slate-700'
+                }`}
+              >
+                🕒 Live Punch Logs
+              </button>
+              <button 
+                onClick={() => setActiveTab('presence')}
+                className={`text-xs font-bold pb-2 border-b-2 transition-all cursor-pointer shrink-0 ${
+                  activeTab === 'presence' 
+                    ? 'border-blue-600 text-blue-600' 
+                    : 'border-transparent text-slate-500 hover:text-slate-700'
+                }`}
+              >
+                👥 Presence & Shift Board
+              </button>
+              <button 
+                onClick={() => setActiveTab('analytics')}
+                className={`text-xs font-bold pb-2 border-b-2 transition-all cursor-pointer shrink-0 ${
+                  activeTab === 'analytics' 
+                    ? 'border-blue-600 text-blue-600' 
+                    : 'border-transparent text-slate-500 hover:text-slate-700'
+                }`}
+              >
+                📈 Advanced Analytics
+              </button>
+              <button 
+                onClick={() => setActiveTab('export')}
+                className={`text-xs font-bold pb-2 border-b-2 transition-all cursor-pointer shrink-0 ${
+                  activeTab === 'export' 
+                    ? 'border-blue-600 text-blue-600' 
+                    : 'border-transparent text-slate-500 hover:text-slate-700'
+                }`}
+              >
+                📊 Reports & Export Hub
+              </button>
+            </div>
+            
+            <div className="hidden lg:block text-[10px] text-slate-400 font-bold uppercase tracking-wider">
+              {activeTab === 'logs' && 'Live Stream Logs'}
+              {activeTab === 'presence' && 'Real-Time Presence'}
+              {activeTab === 'analytics' && 'Workforce Insights'}
+              {activeTab === 'export' && 'PDF & Excel Reporting'}
+            </div>
           </div>
 
-          {/* Filter Bar (Only shown on Logs & Presence tabs) */}
+          {/* Filter Bar (Shown on Logs, Presence, and Analytics tabs) */}
           {activeTab !== 'export' && (
-            <div className="flex flex-col md:flex-row items-stretch md:items-center gap-2.5 w-full md:w-auto">
+            <div className="flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3 w-full animate-fadeIn">
               
-              {/* Row 1 on mobile: Search Bar + Jump-to-Export button */}
-              <div className="flex items-center gap-2 w-full md:w-auto md:flex-1">
-                {/* Search Input */}
-                <div className="relative flex-1 md:w-44">
+              {/* Left Side: Search Bar */}
+              {activeTab !== 'analytics' ? (
+                <div className="relative flex-1 max-w-md">
                   <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-slate-400" />
                   <input
                     type="text"
-                    placeholder="Search Name/ID..."
+                    placeholder="Search employee name or ID..."
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
-                    className="w-full pl-8 pr-3 py-1.5 border border-slate-200 rounded-xl text-xs bg-white placeholder-slate-400 text-slate-700 outline-none focus:border-blue-500 transition-all"
+                    className="w-full pl-8 pr-3 py-2 border border-slate-200 rounded-xl text-xs bg-white placeholder-slate-400 text-slate-700 outline-none focus:border-blue-500 transition-all shadow-sm"
                   />
                 </div>
+              ) : (
+                <div className="text-xs text-slate-500 font-semibold flex items-center gap-1.5">
+                  <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                  Interactive analytics workspace for current filters.
+                </div>
+              )}
 
-                {/* Quick Jump to Export Tab (Only visible on Row 1 on mobile) */}
-                <button
-                  onClick={() => {
-                    setExportReportType(activeTab === 'logs' ? 'logs' : 'timesheet');
-                    setActiveTab('export');
-                  }}
-                  className="flex items-center justify-center p-2.5 border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 rounded-xl transition-all shadow-sm cursor-pointer md:hidden shrink-0"
-                  title="Go to Export Hub"
-                >
-                  <Download className="h-3.5 w-3.5 text-slate-500" />
-                </button>
-              </div>
-
-              {/* Row 2 on mobile: Date Scope + Status Selectors */}
-              <div className="flex items-center gap-2 w-full md:w-auto">
+              {/* Right Side: Filters & Controls */}
+              <div className="flex flex-wrap items-center gap-2 sm:gap-3">
                 {/* Date Scope Selector */}
                 {activeTab === 'logs' && (
-                  <div className="flex bg-slate-100 p-0.5 rounded-xl border border-slate-200 flex-1 md:flex-initial">
+                  <div className="flex bg-slate-100 p-0.5 rounded-xl border border-slate-200">
                     <button
                       onClick={() => setDateScope('today')}
-                      className={`flex-1 md:flex-initial text-[10px] font-bold px-2.5 py-1.5 rounded-lg transition-all cursor-pointer text-center ${
+                      className={`text-[10px] font-bold px-3 py-1.5 rounded-lg transition-all cursor-pointer text-center ${
                         dateScope === 'today' 
                           ? 'bg-white text-slate-900 shadow-sm border border-slate-200/50' 
                           : 'text-slate-500 hover:text-slate-700'
@@ -1574,7 +2545,7 @@ export default function App() {
                     </button>
                     <button
                       onClick={() => setDateScope('all')}
-                      className={`flex-1 md:flex-initial text-[10px] font-bold px-2.5 py-1.5 rounded-lg transition-all cursor-pointer text-center ${
+                      className={`text-[10px] font-bold px-3 py-1.5 rounded-lg transition-all cursor-pointer text-center ${
                         dateScope === 'all' 
                           ? 'bg-white text-slate-900 shadow-sm border border-slate-200/50' 
                           : 'text-slate-500 hover:text-slate-700'
@@ -1585,43 +2556,44 @@ export default function App() {
                   </div>
                 )}
 
-                {/* Presence Status Selector */}
-                <div className="relative md:w-36 flex-1 md:flex-initial status-dropdown-container">
+                {/* Department Dropdown Selector */}
+                <div className="relative w-full sm:w-36 dept-dropdown-container">
                   <button
                     type="button"
-                    onClick={() => setIsStatusDropdownOpen(!isStatusDropdownOpen)}
-                    className="w-full px-3 py-1.5 border border-slate-200 rounded-xl text-xs bg-white text-slate-700 outline-none cursor-pointer flex items-center justify-between shadow-sm hover:border-slate-300 transition-all text-left"
+                    onClick={() => setIsDeptDropdownOpen(!isDeptDropdownOpen)}
+                    className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs bg-white text-slate-700 outline-none cursor-pointer flex items-center justify-between shadow-sm hover:border-slate-300 transition-all text-left"
                   >
                     <span className="truncate">
-                      {statusFilter === 'All' && 'All Statuses'}
-                      {statusFilter === 'IN' && 'Present (IN)'}
-                      {statusFilter === 'OUT' && 'Absent (OUT)'}
+                      {departmentFilter === 'All' ? 'All Depts' : departmentFilter}
                     </span>
                     <ChevronDown className="h-3.5 w-3.5 text-slate-400 flex-shrink-0" />
                   </button>
 
-                  {isStatusDropdownOpen && (
+                  {isDeptDropdownOpen && (
                     <div className="absolute right-0 mt-1 bg-white border border-slate-200 rounded-xl shadow-lg z-30 p-1.5 min-w-[140px] w-full animate-fadeIn space-y-0.5">
                       {[
-                        { value: 'All', label: 'All Statuses' },
-                        { value: 'IN', label: 'Present (IN)' },
-                        { value: 'OUT', label: 'Absent (OUT)' }
+                        { value: 'All', label: 'All Departments' },
+                        { value: 'Engineering', label: 'Engineering' },
+                        { value: 'Operations', label: 'Operations' },
+                        { value: 'Marketing', label: 'Marketing' },
+                        { value: 'HR', label: 'Human Resources' },
+                        { value: 'Sales', label: 'Sales' }
                       ].map((item) => (
                         <button
                           key={item.value}
                           type="button"
                           onClick={() => {
-                            setStatusFilter(item.value);
-                            setIsStatusDropdownOpen(false);
+                            setDepartmentFilter(item.value);
+                            setIsDeptDropdownOpen(false);
                           }}
                           className={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs flex justify-between items-center transition-colors cursor-pointer hover:bg-slate-50 ${
-                            statusFilter === item.value 
+                            departmentFilter === item.value 
                               ? 'bg-blue-50/70 text-blue-750 font-bold' 
                               : 'text-slate-700'
                           }`}
                         >
                           <span className="truncate">{item.label}</span>
-                          {statusFilter === item.value && (
+                          {departmentFilter === item.value && (
                             <Check className="h-3.5 w-3.5 text-blue-600 flex-shrink-0" />
                           )}
                         </button>
@@ -1630,24 +2602,364 @@ export default function App() {
                   )}
                 </div>
 
-                {/* Quick Jump to Export Tab (Only visible on desktop) */}
-                <button
-                  onClick={() => {
-                    setExportReportType(activeTab === 'logs' ? 'logs' : 'timesheet');
-                    setActiveTab('export');
-                  }}
-                  className="hidden md:flex items-center justify-center p-2 border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 rounded-xl transition-all shadow-sm cursor-pointer shrink-0"
-                  title="Go to Export Hub"
-                >
-                  <Download className="h-3.5 w-3.5 text-slate-500" />
-                </button>
-              </div>
+                {/* Presence Status Selector */}
+                {activeTab !== 'analytics' && (
+                  <div className="relative w-full sm:w-36 status-dropdown-container">
+                    <button
+                      type="button"
+                      onClick={() => setIsStatusDropdownOpen(!isStatusDropdownOpen)}
+                      className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs bg-white text-slate-700 outline-none cursor-pointer flex items-center justify-between shadow-sm hover:border-slate-300 transition-all text-left"
+                    >
+                      <span className="truncate">
+                        {statusFilter === 'All' && 'All Statuses'}
+                        {statusFilter === 'IN' && 'Present (IN)'}
+                        {statusFilter === 'OUT' && 'Absent (OUT)'}
+                      </span>
+                      <ChevronDown className="h-3.5 w-3.5 text-slate-400 flex-shrink-0" />
+                    </button>
 
+                    {isStatusDropdownOpen && (
+                      <div className="absolute right-0 mt-1 bg-white border border-slate-200 rounded-xl shadow-lg z-30 p-1.5 min-w-[140px] w-full animate-fadeIn space-y-0.5">
+                        {[
+                          { value: 'All', label: 'All Statuses' },
+                          { value: 'IN', label: 'Present (IN)' },
+                          { value: 'OUT', label: 'Absent (OUT)' }
+                        ].map((item) => (
+                          <button
+                            key={item.value}
+                            type="button"
+                            onClick={() => {
+                              setStatusFilter(item.value);
+                              setIsStatusDropdownOpen(false);
+                            }}
+                            className={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs flex justify-between items-center transition-colors cursor-pointer hover:bg-slate-50 ${
+                              statusFilter === item.value 
+                                ? 'bg-blue-50/70 text-blue-750 font-bold' 
+                                : 'text-slate-700'
+                            }`}
+                          >
+                            <span className="truncate">{item.label}</span>
+                            {statusFilter === item.value && (
+                              <Check className="h-3.5 w-3.5 text-blue-600 flex-shrink-0" />
+                            )}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Quick Jump to Export Tab */}
+                {activeTab !== 'analytics' && (
+                  <button
+                    onClick={() => {
+                      setExportReportType(activeTab === 'logs' ? 'logs' : 'timesheet');
+                      setActiveTab('export');
+                    }}
+                    className="flex items-center justify-center p-2.5 border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 rounded-xl transition-all shadow-sm cursor-pointer shrink-0"
+                    title="Go to Export Hub"
+                  >
+                    <Download className="h-3.5 w-3.5 text-slate-500" />
+                  </button>
+                )}
+              </div>
             </div>
           )}
         </div>
 
-        {activeTab === 'export' ? (
+        {activeTab === 'analytics' ? (
+          /* Full Width Analytics Dashboard Workspace */
+          <div className="space-y-6 animate-fadeIn">
+            {/* Analytics Date Selector & Details Bar */}
+            <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+              <div className="space-y-1">
+                <h2 className="text-base font-black text-slate-900 tracking-tight">Advanced Attendance Insights</h2>
+                <p className="text-xs text-slate-500 font-medium">Scoping logs for <span className="font-semibold text-slate-700">{analyticsData.summary.totalEmployees} Employees</span> in <span className="font-semibold text-blue-600">{departmentFilter === 'All' ? 'All Departments' : departmentFilter}</span></p>
+              </div>
+
+              {/* Date Scope Controls */}
+              <div className="flex flex-wrap items-center gap-2.5 w-full md:w-auto">
+                <div className="flex bg-slate-100 p-0.5 rounded-xl border border-slate-200">
+                  {[
+                    { value: 'week', label: 'Last 7 Days' },
+                    { value: 'custom', label: 'Custom Range' }
+                  ].map(opt => (
+                    <button
+                      key={opt.value}
+                      onClick={() => setAnalyticsDateScope(opt.value)}
+                      className={`text-[10px] font-bold px-2.5 py-1.5 rounded-lg transition-all cursor-pointer ${
+                        analyticsDateScope === opt.value
+                          ? 'bg-white text-slate-900 shadow-sm border border-slate-200/50'
+                          : 'text-slate-500 hover:text-slate-700'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+
+                {analyticsDateScope === 'custom' && (
+                  <div className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 p-1 rounded-xl">
+                    <input
+                      type="date"
+                      value={analyticsStartDate}
+                      onChange={(e) => setAnalyticsStartDate(e.target.value)}
+                      className="bg-transparent text-[10px] font-bold text-slate-700 outline-none px-1"
+                    />
+                    <span className="text-[10px] text-slate-400 font-bold">to</span>
+                    <input
+                      type="date"
+                      value={analyticsEndDate}
+                      onChange={(e) => setAnalyticsEndDate(e.target.value)}
+                      className="bg-transparent text-[10px] font-bold text-slate-700 outline-none px-1"
+                    />
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* KPI Cards Grid */}
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+              {/* Card 1: Attendance rate */}
+              <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm flex flex-col justify-between min-h-[110px]">
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Attendance Rate</span>
+                <span className="text-2xl font-black text-slate-900 mt-1">{Math.round(analyticsData.summary.attendanceRate)}%</span>
+                <span className="text-[10px] text-emerald-600 font-semibold mt-1">Present: {analyticsData.summary.presentToday} | Leave: {analyticsData.summary.leaveCount}</span>
+              </div>
+
+              {/* Card 2: Average Hours */}
+              <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm flex flex-col justify-between min-h-[110px]">
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Avg Daily Hours</span>
+                <span className="text-2xl font-black text-slate-900 mt-1">
+                  {Math.floor(analyticsData.summary.averageWorkingHours)}h {Math.round((analyticsData.summary.averageWorkingHours % 1) * 60)}m
+                </span>
+                <span className="text-[10px] text-blue-600 font-semibold mt-1">Standard target: 8h</span>
+              </div>
+
+              {/* Card 3: Average Arrival time */}
+              <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm flex flex-col justify-between min-h-[110px]">
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Avg First IN</span>
+                <span className="text-2xl font-black text-slate-900 mt-1">{analyticsData.summary.averageArrivalStr}</span>
+                <span className="text-[10px] text-amber-600 font-semibold mt-1">Total Lates: {analyticsData.summary.lateArrivals} {"(>9:15)"}</span>
+              </div>
+
+              {/* Card 4: Overtime Hours */}
+              <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm flex flex-col justify-between min-h-[110px]">
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Total Overtime</span>
+                <span className="text-2xl font-black text-slate-900 mt-1">
+                  {Math.floor(analyticsData.summary.totalOvertimeHours)}h {Math.round((analyticsData.summary.totalOvertimeHours % 1) * 60)}m
+                </span>
+                <span className="text-[10px] text-emerald-600 font-semibold mt-1">Accumulated in range</span>
+              </div>
+            </div>
+
+            {/* Trends & Heatmap Grid */}
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              {/* Daily Attendance Trend */}
+              <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm space-y-4 lg:col-span-2">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider">Daily Attendance Trend</h3>
+                  <span className="text-[10px] font-bold text-slate-400">Presence % per Day</span>
+                </div>
+                <div className="h-48 flex items-end justify-between gap-1 pt-4 border-b border-l border-slate-100 px-2">
+                  {analyticsData.attendanceTrend.map((d, idx) => (
+                    <div key={idx} className="flex-1 flex flex-col items-center group relative h-full justify-end">
+                      {/* Tooltip */}
+                      <div className="absolute bottom-full mb-1 bg-slate-900 text-white text-[9px] font-bold px-2 py-0.5 rounded opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none whitespace-nowrap z-10 shadow">
+                        {d.rate.toFixed(1)}% ({d.presentCount} present)
+                      </div>
+                      {/* Bar */}
+                      <div 
+                        className="w-full bg-blue-500 hover:bg-blue-600 rounded-t transition-all"
+                        style={{ height: `${Math.max(d.rate, 6)}%` }}
+                      ></div>
+                      <span className="text-[8px] font-semibold text-slate-400 mt-1 truncate max-w-full">
+                        {new Date(d.dateStr).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Late Arrivals Heatmap */}
+              <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm space-y-4">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider">Late Arrivals Heat Map</h3>
+                  <span className="text-[10px] font-bold text-slate-400">Lates by hour/day</span>
+                </div>
+                <div className="grid grid-cols-6 gap-1.5 pt-2">
+                  <span className="text-[8px] font-bold text-slate-400">Day</span>
+                  {['8AM', '9AM', '10AM', '11AM', '12PM+'].map(h => (
+                    <span key={h} className="text-[8px] font-bold text-slate-400 text-center">{h}</span>
+                  ))}
+
+                  {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((dayName, dIdx) => (
+                    <React.Fragment key={dIdx}>
+                      <span className="text-[8px] font-bold text-slate-500 self-center">{dayName}</span>
+                      {analyticsData.heatmap[dIdx].map((slot, sIdx) => {
+                        let bg = 'bg-slate-50 border-slate-100';
+                        let text = 'text-slate-300';
+                        if (slot.count > 4) {
+                          bg = 'bg-rose-500 text-white';
+                        } else if (slot.count > 2) {
+                          bg = 'bg-rose-300 text-white';
+                        } else if (slot.count > 0) {
+                          bg = 'bg-rose-100 text-rose-850 border-rose-200';
+                        }
+                        return (
+                          <div 
+                            key={sIdx} 
+                            className={`aspect-square rounded flex items-center justify-center text-[9px] font-black border transition-all ${bg}`}
+                            title={`${dayName} at ${slot.hourSlot} AM: ${slot.count} lates`}
+                          >
+                            {slot.count > 0 ? slot.count : '-'}
+                          </div>
+                        );
+                      })}
+                    </React.Fragment>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* Leaderboards Grid */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              {/* Leaderboard 1: Punctual */}
+              <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm space-y-3">
+                <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider flex items-center gap-1.5 border-b border-slate-100 pb-2.5">
+                  <span className="h-2 w-2 rounded-full bg-emerald-500"></span>
+                  Top 10 Most Punctual Employees
+                </h3>
+                <div className="divide-y divide-slate-100">
+                  {analyticsData.leaderboard.mostPunctual.length > 0 ? (
+                    analyticsData.leaderboard.mostPunctual.map((item, idx) => (
+                      <div key={item.empId} className="py-2.5 flex items-center justify-between text-xs">
+                        <div className="flex items-center gap-2">
+                          <span className="w-5 font-bold text-slate-400">#{idx + 1}</span>
+                          <div>
+                            <p className="font-bold text-slate-800">{item.name}</p>
+                            <p className="text-[10px] text-slate-400 font-mono">{item.empId}</p>
+                          </div>
+                        </div>
+                        <span className="bg-emerald-50 text-emerald-700 font-bold px-2 py-0.5 rounded border border-emerald-100 font-mono">
+                          Avg: {item.valStr}
+                        </span>
+                      </div>
+                    ))
+                  ) : (
+                    <p className="py-4 text-center text-xs text-slate-400">No punch data found</p>
+                  )}
+                </div>
+              </div>
+
+              {/* Leaderboard 2: Frequently Late */}
+              <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm space-y-3">
+                <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider flex items-center gap-1.5 border-b border-slate-100 pb-2.5">
+                  <span className="h-2 w-2 rounded-full bg-rose-500 animate-pulse"></span>
+                  Top 10 Frequently Late Employees {"(>9:15 AM)"}
+                </h3>
+                <div className="divide-y divide-slate-100">
+                  {analyticsData.leaderboard.frequentlyLate.length > 0 ? (
+                    analyticsData.leaderboard.frequentlyLate.map((item, idx) => (
+                      <div key={item.empId} className="py-2.5 flex items-center justify-between text-xs">
+                        <div className="flex items-center gap-2">
+                          <span className="w-5 font-bold text-slate-400">#{idx + 1}</span>
+                          <div>
+                            <p className="font-bold text-slate-800">{item.name}</p>
+                            <p className="text-[10px] text-slate-400 font-mono">{item.empId}</p>
+                          </div>
+                        </div>
+                        <span className="bg-rose-50 text-rose-700 font-bold px-2 py-0.5 rounded border border-rose-100">
+                          {item.lateCount} Late Arrivals
+                        </span>
+                      </div>
+                    ))
+                  ) : (
+                    <p className="py-4 text-center text-xs text-slate-400">No late entries recorded</p>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Exception Reports Section */}
+            <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm space-y-4">
+              <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
+                ⚠️ Biometric Logs Exception Reports
+              </h3>
+              
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                {/* Column 1: Missing IN / OUT Punches */}
+                <div className="space-y-3">
+                  <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Missing IN / OUT Punches</h4>
+                  <div className="max-h-60 overflow-y-auto space-y-2 border border-slate-100 rounded-xl p-2.5 divide-y divide-slate-100 bg-slate-50/50">
+                    {analyticsData.exceptions.missingIn.length === 0 && analyticsData.exceptions.missingOut.length === 0 && (
+                      <p className="text-center text-[10px] text-slate-450 py-4 font-bold">No anomalies detected</p>
+                    )}
+                    {analyticsData.exceptions.missingIn.map((item, i) => (
+                      <div key={`in-${i}`} className="text-[10px] py-1.5">
+                        <div className="flex justify-between">
+                          <span className="font-bold text-slate-850">{item.name}</span>
+                          <span className="text-rose-600 font-black uppercase text-[8px] bg-rose-50 px-1.5 py-0.5 rounded border border-rose-100">Missing IN</span>
+                        </div>
+                        <p className="text-slate-400 mt-0.5 font-mono">{item.date} at {item.time}</p>
+                      </div>
+                    ))}
+                    {analyticsData.exceptions.missingOut.map((item, i) => (
+                      <div key={`out-${i}`} className="text-[10px] py-1.5">
+                        <div className="flex justify-between">
+                          <span className="font-bold text-slate-850">{item.name}</span>
+                          <span className="text-amber-600 font-black uppercase text-[8px] bg-amber-50 px-1.5 py-0.5 rounded border border-amber-100">Missing OUT</span>
+                        </div>
+                        <p className="text-slate-400 mt-0.5 font-mono">{item.date} at {item.time} (Auto-OUT)</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Column 2: Duplicate Punches */}
+                <div className="space-y-3">
+                  <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Duplicate Punches (&lt;3 mins)</h4>
+                  <div className="max-h-60 overflow-y-auto space-y-2 border border-slate-100 rounded-xl p-2.5 divide-y divide-slate-100 bg-slate-50/50">
+                    {analyticsData.exceptions.duplicates.length === 0 ? (
+                      <p className="text-center text-[10px] text-slate-450 py-4 font-bold">No duplicate entries found</p>
+                    ) : (
+                      analyticsData.exceptions.duplicates.map((item, i) => (
+                        <div key={`dup-${i}`} className="text-[10px] py-1.5">
+                          <div className="flex justify-between">
+                            <span className="font-bold text-slate-850">{item.name}</span>
+                            <span className="text-blue-600 font-bold font-mono text-[9px]">{item.time}</span>
+                          </div>
+                          <p className="text-slate-500 mt-0.5 font-medium">{item.detail}</p>
+                          <p className="text-slate-400 mt-0.5 font-mono text-[9px]">{item.date}</p>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+
+                {/* Column 3: Employees Without Attendance */}
+                <div className="space-y-3">
+                  <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">No Attendance Recorded</h4>
+                  <div className="max-h-60 overflow-y-auto space-y-2 border border-slate-100 rounded-xl p-2.5 divide-y divide-slate-100 bg-slate-50/50">
+                    {analyticsData.exceptions.noAttendance.length === 0 ? (
+                      <p className="text-center text-[10px] text-slate-450 py-4 font-bold">All employees present in period</p>
+                    ) : (
+                      analyticsData.exceptions.noAttendance.map((item) => (
+                        <div key={item.empId} className="text-[10px] py-1.5 flex justify-between items-center">
+                          <div>
+                            <span className="font-bold text-slate-850">{item.name}</span>
+                            <p className="text-slate-400 mt-0.5 font-mono">{item.empId}</p>
+                          </div>
+                          <span className="text-[9px] font-bold bg-slate-100 text-slate-500 px-2 py-0.5 rounded border border-slate-200">{item.department}</span>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : activeTab === 'export' ? (
           /* Full Width Reports Workspace */
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-stretch">
             {/* CONFIGURATION COLUMN (1/3) */}
@@ -1932,8 +3244,122 @@ export default function App() {
                 </div>
               </div>
 
+              {/* PDF Customize Section */}
+              <div className="pt-4 border-t border-slate-100 space-y-4">
+                <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">4. Custom PDF Options</h3>
+                
+                {/* Theme Selector */}
+                <div>
+                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1.5">
+                    Report Color Theme
+                  </label>
+                  <div className="grid grid-cols-4 gap-2">
+                    {[
+                      { id: 'slate', name: 'Slate', color: 'bg-slate-700' },
+                      { id: 'blue', name: 'Blue', color: 'bg-blue-600' },
+                      { id: 'emerald', name: 'Emerald', color: 'bg-emerald-600' },
+                      { id: 'indigo', name: 'Indigo', color: 'bg-indigo-600' }
+                    ].map(theme => (
+                      <button
+                        key={theme.id}
+                        type="button"
+                        onClick={() => setPdfThemeColor(theme.id)}
+                        className={`flex flex-col items-center justify-center py-2 px-1 border rounded-lg transition-all cursor-pointer ${
+                          pdfThemeColor === theme.id 
+                            ? 'border-slate-800 bg-slate-50 font-bold text-slate-900' 
+                            : 'border-slate-200 hover:border-slate-250 text-slate-600 text-[10px]'
+                        }`}
+                      >
+                        <span className={`h-3 w-3 rounded-full ${theme.color} mb-1 shadow-sm`}></span>
+                        <span className="text-[9px] font-semibold">{theme.name}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Company Name */}
+                <div>
+                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1.5">
+                    Company Header Name
+                  </label>
+                  <input
+                    type="text"
+                    value={pdfCompanyName}
+                    onChange={(e) => setPdfCompanyName(e.target.value)}
+                    placeholder="Enter company name..."
+                    className="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs"
+                  />
+                </div>
+
+                {/* Custom Comments */}
+                <div>
+                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1.5">
+                    Custom Footer Comments
+                  </label>
+                  <textarea
+                    value={pdfComments}
+                    onChange={(e) => setPdfComments(e.target.value)}
+                    placeholder="Add report footnotes..."
+                    rows={2}
+                    className="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs resize-none"
+                  />
+                </div>
+
+                {/* Column Selector */}
+                <div>
+                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1.5">
+                    Select Columns to Include
+                  </label>
+                  {exportReportType === 'logs' ? (
+                    <div className="grid grid-cols-2 gap-x-2 gap-y-1">
+                      {[
+                        { id: 'logId', label: 'Log ID' },
+                        { id: 'empId', label: 'Employee ID' },
+                        { id: 'empName', label: 'Employee Name' },
+                        { id: 'direction', label: 'Direction' },
+                        { id: 'date', label: 'Date' },
+                        { id: 'time', label: 'Time' }
+                      ].map(col => (
+                        <label key={col.id} className="flex items-center space-x-1.5 text-[10px] text-slate-700 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={pdfLogColumns[col.id]}
+                            onChange={(e) => setPdfLogColumns(prev => ({ ...prev, [col.id]: e.target.checked }))}
+                            className="rounded text-blue-600 focus:ring-blue-500 h-3 w-3"
+                          />
+                          <span>{col.label}</span>
+                        </label>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-2 gap-x-2 gap-y-1">
+                      {[
+                        { id: 'empId', label: 'Employee ID' },
+                        { id: 'empName', label: 'Employee Name' },
+                        { id: 'daysPresent', label: 'Days Present' },
+                        { id: 'punchesCount', label: 'Total Punches' },
+                        { id: 'totalHours', label: 'Total Hours' },
+                        { id: 'totalBreakHours', label: 'Total Breaks' },
+                        { id: 'avgDailyHours', label: 'Avg Daily Hours' },
+                        { id: 'goalStatus', label: 'Shift Goal Status' }
+                      ].map(col => (
+                        <label key={col.id} className="flex items-center space-x-1.5 text-[10px] text-slate-700 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={pdfTimesheetColumns[col.id]}
+                            onChange={(e) => setPdfTimesheetColumns(prev => ({ ...prev, [col.id]: e.target.checked }))}
+                            className="rounded text-blue-600 focus:ring-blue-500 h-3 w-3"
+                          />
+                          <span>{col.label}</span>
+                        </label>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+
               <div className="pt-4 border-t border-slate-100 flex flex-col gap-3">
-                <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">4. Export Actions</h3>
+                <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">5. Export Actions</h3>
                 <div className="flex gap-3">
                   <button
                     onClick={handleClipboardExport}
@@ -1952,12 +3378,21 @@ export default function App() {
                 </div>
 
                 <button
-                  onClick={handlePrintPDFReport}
+                  onClick={handleExportXLSX}
+                  disabled={copySuccess || exportSuccess || isFetchingExportData || isPreviewLoading}
+                  className="w-full py-2.5 px-3 border border-blue-250 bg-blue-50 hover:bg-blue-100 text-blue-850 text-xs font-bold rounded-xl flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 transition-all shadow-sm"
+                >
+                  <Download className="h-4 w-4 text-blue-600" />
+                  {exportSuccess ? 'Exported! ✓' : 'Export Multi-Sheet Excel (XLSX)'}
+                </button>
+
+                <button
+                  onClick={handleDownloadPDFReport}
                   disabled={copySuccess || exportSuccess || isFetchingExportData || isPreviewLoading}
                   className="w-full py-2.5 px-3 border border-emerald-250 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 text-xs font-bold rounded-xl flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 transition-all shadow-sm"
                 >
-                  <Printer className="h-4 w-4 text-emerald-600" />
-                  {isFetchingExportData ? 'Preparing...' : 'Print Report / Save as PDF'}
+                  <Download className="h-4 w-4 text-emerald-600" />
+                  {isFetchingExportData ? 'Preparing...' : 'Download PDF Report'}
                 </button>
               </div>
             </div>
@@ -2017,8 +3452,8 @@ export default function App() {
                                   </span>
                                 </td>
                                 <td className="px-3 py-2 text-right text-slate-700">
-                                  <div className="font-mono">{new Date(log.timestamp).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })}</div>
-                                  <div className="text-[9px] text-slate-400">{new Date(log.timestamp).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}</div>
+                                  <div className="font-mono">{parseDBDate(log.timestamp).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })}</div>
+                                  <div className="text-[9px] text-slate-400">{parseDBDate(log.timestamp).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}</div>
                                 </td>
                               </tr>
                             );
@@ -2705,8 +4140,17 @@ export default function App() {
                             >
                               {/* Identity Header */}
                               <div className="flex items-start justify-between gap-3">
-                                <div>
-                                  <h4 className="text-xs font-bold text-slate-900">{emp.name}</h4>
+                                <div className="flex-1">
+                                  <div className="flex items-center gap-1.5">
+                                    <h4 className="text-xs font-bold text-slate-900">{emp.name}</h4>
+                                    <button
+                                      onClick={() => setSelectedProfileEmpId(empId)}
+                                      className="text-slate-400 hover:text-slate-600 transition-colors p-0.5 rounded hover:bg-slate-100 cursor-pointer"
+                                      title="View Detailed Profile & Analytics"
+                                    >
+                                      <BarChart3 className="h-3 w-3" />
+                                    </button>
+                                  </div>
                                   <p className="text-[9px] font-mono text-slate-400 font-bold mt-0.5">{empId}</p>
                                 </div>
                                 
@@ -2870,6 +4314,23 @@ export default function App() {
         )}
       </main>
 
+      {/* Hidden container for PDF rendering */}
+      {pdfReportHtml && (
+        <div 
+          id="pdf-report-render-target" 
+          dangerouslySetInnerHTML={{ __html: pdfReportHtml }} 
+          style={{ 
+            position: 'absolute', 
+            left: '-9999px', 
+            top: '-9999px', 
+            width: '794px', 
+            background: 'white',
+            zIndex: -999,
+            pointerEvents: 'none'
+          }} 
+        />
+      )}
+
       {/* Footer */}
       <footer className="bg-white border-t border-slate-200 py-5 text-center text-xs text-slate-400 mt-12">
         <div className="max-w-7xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-4">
@@ -2880,6 +4341,211 @@ export default function App() {
           </div>
         </div>
       </footer>
+
+      {/* Employee Profile & Analytics Modal */}
+      {selectedProfileEmpId && selectedEmployeeAnalytics && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 transition-all duration-300">
+          <div className="bg-white border border-slate-200 rounded-2xl w-full max-w-4xl max-h-[90vh] shadow-2xl flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+            {/* Modal Header */}
+            <div className="bg-slate-900 text-white p-5 flex items-center justify-between">
+              <div className="flex items-center gap-3.5">
+                <div className="h-12 w-12 rounded-full bg-slate-800 border border-slate-700 flex items-center justify-center font-bold text-lg text-slate-200 shadow-inner">
+                  {(employees[selectedProfileEmpId]?.name || 'E').split(' ').map(n => n[0]).join('')}
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h3 className="font-extrabold text-base tracking-tight">{employees[selectedProfileEmpId]?.name}</h3>
+                    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[9px] font-bold ${
+                      (employeePresenceMap[selectedProfileEmpId]?.status === 'IN') 
+                        ? 'bg-emerald-500/20 text-emerald-305 border border-emerald-500/30' 
+                        : 'bg-slate-700 text-slate-350 border border-slate-650'
+                    }`}>
+                      {(employeePresenceMap[selectedProfileEmpId]?.status === 'IN') ? 'IN' : 'OUT'}
+                    </span>
+                  </div>
+                  <p className="text-[10px] text-slate-400 font-mono mt-0.5">{selectedProfileEmpId} • Staff Member</p>
+                </div>
+              </div>
+              
+              <button
+                onClick={() => setSelectedProfileEmpId(null)}
+                className="text-slate-400 hover:text-white hover:bg-slate-800 transition-all p-1.5 rounded-lg cursor-pointer"
+              >
+                <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="flex-1 overflow-y-auto p-6 space-y-6 scrollbar-thin">
+              {/* Analytics Summary Stats Grid */}
+              <div>
+                <h4 className="text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-3">Performance Analytics</h4>
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
+                  {/* Goal Compliance Gauge */}
+                  <div className="bg-slate-50 border border-slate-150 p-4 rounded-xl flex items-center justify-between gap-3">
+                    <div className="space-y-1">
+                      <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Goal Compliance</p>
+                      <p className="text-xl font-black text-slate-900 font-mono">
+                        {Math.round(selectedEmployeeAnalytics.goalComplianceRate)}%
+                      </p>
+                      <p className="text-[9px] text-slate-505 font-medium">Days met 7h+ goal</p>
+                    </div>
+                    <div className="relative h-14 w-14">
+                      {/* SVG Gauge */}
+                      <svg className="w-full h-full transform -rotate-90">
+                        <circle cx="28" cy="28" r="22" className="stroke-slate-200 fill-transparent" strokeWidth="4" />
+                        <circle 
+                          cx="28" 
+                          cy="28" 
+                          r="22" 
+                          className={`${selectedEmployeeAnalytics.goalComplianceRate >= 75 ? 'stroke-emerald-500' : selectedEmployeeAnalytics.goalComplianceRate >= 50 ? 'stroke-amber-500' : 'stroke-rose-500'} fill-transparent`} 
+                          strokeWidth="4" 
+                          strokeDasharray={2 * Math.PI * 22}
+                          strokeDashoffset={2 * Math.PI * 22 * (1 - selectedEmployeeAnalytics.goalComplianceRate / 100)}
+                        />
+                      </svg>
+                    </div>
+                  </div>
+
+                  {/* Punctuality Gauge */}
+                  <div className="bg-slate-50 border border-slate-150 p-4 rounded-xl flex items-center justify-between gap-3">
+                    <div className="space-y-1">
+                      <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">On-Time Arrival</p>
+                      <p className="text-xl font-black text-slate-900 font-mono">
+                        {Math.round(selectedEmployeeAnalytics.punctualityRate)}%
+                      </p>
+                      <p className="text-[9px] text-slate-505 font-medium">First In by 9:15 AM</p>
+                    </div>
+                    <div className="relative h-14 w-14">
+                      {/* SVG Gauge */}
+                      <svg className="w-full h-full transform -rotate-90">
+                        <circle cx="28" cy="28" r="22" className="stroke-slate-200 fill-transparent" strokeWidth="4" />
+                        <circle 
+                          cx="28" 
+                          cy="28" 
+                          r="22" 
+                          className={`${selectedEmployeeAnalytics.punctualityRate >= 85 ? 'stroke-emerald-500' : selectedEmployeeAnalytics.punctualityRate >= 60 ? 'stroke-amber-500' : 'stroke-rose-500'} fill-transparent`} 
+                          strokeWidth="4" 
+                          strokeDasharray={2 * Math.PI * 22}
+                          strokeDashoffset={2 * Math.PI * 22 * (1 - selectedEmployeeAnalytics.punctualityRate / 100)}
+                        />
+                      </svg>
+                    </div>
+                  </div>
+
+                  {/* Avg Daily Hours */}
+                  <div className="bg-slate-50 border border-slate-150 p-4 rounded-xl space-y-2">
+                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Avg Daily Hours</p>
+                    <div className="flex items-baseline gap-1">
+                      <p className="text-xl font-black text-slate-950 font-mono">
+                        {Math.floor(selectedEmployeeAnalytics.avgWorkHours)}h
+                      </p>
+                      <p className="text-sm font-bold text-slate-605 font-mono">
+                        {Math.round((selectedEmployeeAnalytics.avgWorkHours % 1) * 60)}m
+                      </p>
+                    </div>
+                    <div className="w-full bg-slate-200 h-1.5 rounded-full overflow-hidden">
+                      <div 
+                        className={`h-full ${selectedEmployeeAnalytics.avgWorkHours >= 7 ? 'bg-emerald-500' : 'bg-amber-500'} transition-all`} 
+                        style={{ width: `${Math.min((selectedEmployeeAnalytics.avgWorkHours / 8) * 100, 100)}%` }}
+                      ></div>
+                    </div>
+                  </div>
+
+                  {/* Avg Breaks */}
+                  <div className="bg-slate-50 border border-slate-150 p-4 rounded-xl space-y-2">
+                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Avg Daily Break</p>
+                    <div className="flex items-baseline gap-1">
+                      <p className="text-xl font-black text-amber-600 font-mono">
+                        {Math.floor(selectedEmployeeAnalytics.avgBreakHours)}h
+                      </p>
+                      <p className="text-sm font-bold text-amber-550 font-mono">
+                        {Math.round((selectedEmployeeAnalytics.avgBreakHours % 1) * 60)}m
+                      </p>
+                    </div>
+                    <div className="w-full bg-slate-200 h-1.5 rounded-full overflow-hidden">
+                      <div 
+                        className="h-full bg-amber-500 transition-all" 
+                        style={{ width: `${Math.min((selectedEmployeeAnalytics.avgBreakHours / 2) * 100, 100)}%` }}
+                      ></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Attendance Log History */}
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <h4 className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Attendance Log History</h4>
+                  <span className="text-[10px] text-slate-500 font-medium">{selectedEmployeeAnalytics.daysPresentCount} days recorded</span>
+                </div>
+
+                <div className="border border-slate-200 rounded-xl overflow-hidden shadow-sm">
+                  <div className="overflow-x-auto">
+                    <table className="w-full border-collapse text-left text-xs text-slate-500">
+                      <thead className="bg-slate-50 text-[10px] font-bold uppercase text-slate-400 tracking-wider border-b border-slate-200">
+                        <tr>
+                          <th className="px-4 py-2.5">Date</th>
+                          <th className="px-4 py-2.5">First Clock In</th>
+                          <th className="px-4 py-2.5">Last Clock Out</th>
+                          <th className="px-4 py-2.5 text-center">Work Duration</th>
+                          <th className="px-4 py-2.5 text-center">Break Duration</th>
+                          <th className="px-4 py-2.5 text-right">Compliance</th>
+                        </tr>
+                      </thead>
+                      <tbody className="bg-white divide-y divide-slate-150">
+                        {selectedEmployeeAnalytics.daySummaries.map((day, dIdx) => (
+                          <tr key={dIdx} className="hover:bg-slate-50/50">
+                            <td className="px-4 py-2.5 font-semibold text-slate-900">{day.dateStr}</td>
+                            <td className="px-4 py-2.5 font-mono text-slate-705">{day.firstIn}</td>
+                            <td className="px-4 py-2.5 font-mono text-slate-705">{day.lastOut}</td>
+                            <td className="px-4 py-2.5 text-center font-mono font-bold text-slate-800">
+                              {Math.floor(day.hoursWorked)}h {Math.round((day.hoursWorked % 1) * 60)}m
+                            </td>
+                            <td className="px-4 py-2.5 text-center font-mono text-slate-600">
+                              {Math.floor(day.breakHours)}h {Math.round((day.breakHours % 1) * 60)}m
+                            </td>
+                            <td className="px-4 py-2.5 text-right">
+                              <div className="flex justify-end gap-1.5">
+                                {day.isGoalMet ? (
+                                  <span className="inline-flex px-1.5 py-0.5 rounded text-[8px] font-bold bg-emerald-50 text-emerald-705 border border-emerald-100 uppercase">
+                                    Goal Met
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex px-1.5 py-0.5 rounded text-[8px] font-bold bg-rose-50 text-rose-705 border border-rose-100 uppercase">
+                                    Short Hrs
+                                  </span>
+                                )}
+                                {!day.isOnTime && (
+                                  <span className="inline-flex px-1.5 py-0.5 rounded text-[8px] font-bold bg-amber-50 text-amber-705 border border-amber-100 uppercase">
+                                    Late
+                                  </span>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Modal Footer */}
+            <div className="bg-slate-50 border-t border-slate-200 px-6 py-4 flex items-center justify-end">
+              <button
+                onClick={() => setSelectedProfileEmpId(null)}
+                className="px-4 py-2 border border-slate-250 bg-white hover:bg-slate-50 text-slate-700 text-xs font-bold rounded-lg cursor-pointer transition-all shadow-sm"
+              >
+                Close Profile
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
