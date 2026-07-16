@@ -394,7 +394,7 @@ export default function App() {
         .from('biometric_logs')
         .select('*')
         .order('timestamp', { ascending: false })
-        .limit(100);
+        .limit(2000);
 
       if (logsError) throw logsError;
 
