@@ -1,5 +1,6 @@
 import React from 'react';
 import { Clock, RefreshCw, LogOut, Search, Users, BarChart3, FileText, ShieldCheck } from 'lucide-react';
+import PWAInstallPrompt from '@/components/pwa/PWAInstallPrompt';
 
 export default function Header({
   isSupabaseMode,
@@ -102,6 +103,9 @@ export default function Header({
             <Clock className="h-3.5 w-3.5 text-slate-400" />
             <span>{currentTime.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })}</span>
           </div>
+
+          {/* PWA Install App Prompt / Badge */}
+          <PWAInstallPrompt />
 
           {/* Refresh */}
           <button
