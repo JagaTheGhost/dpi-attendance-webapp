@@ -1,6 +1,13 @@
 @import "tailwindcss";
 
 @theme {
+  --color-dpi-violet: #3b3492;
+  --color-dpi-violet-light: #eeedfa;
+  --color-dpi-green: #16a34a;
+  --color-dpi-green-light: #eaf7ed;
+  --color-dpi-red: #dc2626;
+  --color-dpi-red-light: #fcf0f0;
+
   --animate-flashRow: flash 2s ease-out;
   --animate-fadeIn: fadeIn 0.3s ease-out;
   --animate-shimmer: shimmer 2.5s infinite ease-in-out;
@@ -25,8 +32,8 @@
     100% { transform: translateX(200%); }
   }
   @keyframes logoPulse {
-    0%, 100% { transform: scale(1); filter: drop-shadow(0 0 6px rgba(59, 130, 246, 0.1)); }
-    50% { transform: scale(1.05); filter: drop-shadow(0 0 16px rgba(59, 130, 246, 0.3)); }
+    0%, 100% { transform: scale(1); filter: drop-shadow(0 0 6px rgba(59, 52, 146, 0.15)); }
+    50% { transform: scale(1.05); filter: drop-shadow(0 0 16px rgba(59, 52, 146, 0.35)); }
   }
   @keyframes scan {
     0%, 100% { top: 0%; opacity: 0.2; }
@@ -42,8 +49,8 @@
     to { transform: rotate(360deg); }
   }
   @keyframes wave {
-    0% { transform: scale(0.6); opacity: 1; border-color: rgba(59, 130, 246, 0.4); }
-    100% { transform: scale(1.6); opacity: 0; border-color: rgba(59, 130, 246, 0); }
+    0% { transform: scale(0.6); opacity: 1; border-color: rgba(59, 52, 146, 0.4); }
+    100% { transform: scale(1.6); opacity: 0; border-color: rgba(59, 52, 146, 0); }
   }
 }
 
@@ -96,15 +103,32 @@ body {
   scrollbar-color: #cbd5e1 transparent;
 }
 
+/* Accessibility focus ring styling (WCAG 2.1 AA) */
+*:focus-visible {
+  outline: 2px solid #2563eb !important;
+  outline-offset: 2px !important;
+}
+
 /* Unified Card Standard Utilities */
 .ui-card-minimal {
   background-color: #ffffff;
   border: 1px solid rgba(226, 232, 240, 0.9);
-  border-radius: 1.25rem;
+  border-radius: 1rem;
   box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.03);
   transition: all 0.2s ease-in-out;
 }
 
 .ui-card-minimal:hover {
   border-color: rgba(203, 213, 225, 1);
+}
+
+/* DPI Brand Logo Palette Utility Classes */
+.bg-dpi-gradient {
+  background: linear-gradient(135deg, #3b3492 0%, #16a34a 50%, #dc2626 100%);
+}
+
+.text-dpi-gradient {
+  background: linear-gradient(135deg, #3b3492 0%, #16a34a 50%, #dc2626 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
 }

@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useState, useMemo, memo } from 'react';
 import { 
   ArrowDownLeft, 
   ArrowUpRight, 
@@ -11,12 +11,16 @@ import {
   CheckCircle2, 
   ChevronDown,
   Activity,
-  ShieldAlert
+  ShieldAlert,
+  ArrowUpDown,
+  ArrowUp,
+  ArrowDown,
+  ExternalLink
 } from 'lucide-react';
 import { parseDBDate } from '@/utils/dateUtils';
 import CustomDropdown from '@/components/common/CustomDropdown';
 
-export default function AttendanceLogsTable({
+function AttendanceLogsTable({
   paginatedLogs,
   employees,
   highlightedLogId,
@@ -34,6 +38,17 @@ export default function AttendanceLogsTable({
   totalWorkforce,
   currentTime
 }) {
+  const [sortField, setSortField] = useState('timestamp'); // 'log_id' | 'name' | 'direction' | 'department' | 'timestamp'
+  const [sortDirection, setSortDirection] = useState('desc'); // 'asc' | 'desc'
+
+  const handleSortToggle = (field) => {
+    if (sortField === field) {
+      setSortDirection(prev => prev === 'asc' ? 'desc' : 'asc');
+    } else {
+      setSortField(field);
+      setSortDirection('asc');
+    }
+  };
   // 1. Feature 1: Shift Overview & Real-time KPI Counters
   const kpiStats = useMemo(() => {
     let recent60mCount = 0;
@@ -61,17 +76,20 @@ export default function AttendanceLogsTable({
 
   return (
     <div className="space-y-5 animate-fadeIn">
-      {/* Live Shift Overview KPI Cards - Full Width */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <div className="bg-white border border-slate-200/80 rounded-2xl p-4 shadow-sm hover:border-slate-300 transition-all flex items-center justify-between">
+      {/* Live Shift Overview KPI Cards - Clean 3 Grid */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <div className="group bg-white border border-slate-200/80 rounded-2xl p-4 sm:p-5 shadow-xs hover:shadow-md hover:-translate-y-0.5 transition-all duration-200 ease-out flex items-center justify-between">
           <div>
-            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">On Floor Now</span>
-            <div className="flex items-baseline gap-1.5 mt-1">
-              <span className="text-2xl font-extrabold text-slate-900 font-mono tracking-tight">{activeInOfficeCount}</span>
+            <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-1.5">
+              <Activity className="h-3 w-3 text-emerald-600" />
+              On Floor Now
+            </span>
+            <div className="flex items-baseline gap-1.5 mt-1.5">
+              <span className="text-2xl sm:text-3xl font-black text-slate-900 font-mono tracking-tight">{activeInOfficeCount}</span>
               <span className="text-xs font-bold text-slate-400">/ {totalWorkforce || 0} active</span>
             </div>
           </div>
-          <div className="h-11 w-11 rounded-2xl bg-emerald-50 border border-emerald-150 flex items-center justify-center text-emerald-600 shadow-2xs">
+          <div className="h-11 w-11 rounded-2xl bg-emerald-50 border border-emerald-200 flex items-center justify-center text-emerald-600 shadow-2xs group-hover:scale-110 group-hover:rotate-3 transition-transform duration-200">
             <span className="relative flex h-3.5 w-3.5">
               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
               <span className="relative inline-flex rounded-full h-3.5 w-3.5 bg-emerald-500"></span>
@@ -79,34 +97,30 @@ export default function AttendanceLogsTable({
           </div>
         </div>
 
-        <div className="bg-white border border-slate-200/80 rounded-2xl p-4 shadow-sm hover:border-slate-300 transition-all flex items-center justify-between">
+        <div className="group bg-white border border-slate-200/80 rounded-2xl p-4 sm:p-5 shadow-xs hover:shadow-md hover:-translate-y-0.5 transition-all duration-200 ease-out flex items-center justify-between">
           <div>
-            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Filtered Logs</span>
-            <span className="text-2xl font-extrabold text-slate-900 font-mono tracking-tight mt-1 block">{logsFilteredBySearch.length}</span>
+            <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-1.5">
+              <Clock className="h-3 w-3 text-sky-600" />
+              Today's Logs
+            </span>
+            <span className="text-2xl sm:text-3xl font-black text-slate-900 font-mono tracking-tight mt-1.5 block">{logsFilteredBySearch.length}</span>
           </div>
-          <div className="h-11 w-11 rounded-2xl bg-blue-50 border border-blue-150 flex items-center justify-center text-blue-600 shadow-2xs">
+          <div className="h-11 w-11 rounded-2xl bg-sky-50 border border-sky-200 flex items-center justify-center text-sky-600 shadow-2xs group-hover:scale-110 group-hover:rotate-3 transition-transform duration-200">
             <Clock className="h-5 w-5" />
           </div>
         </div>
 
-        <div className="bg-white border border-slate-200/80 rounded-2xl p-4 shadow-sm hover:border-slate-300 transition-all flex items-center justify-between">
+        <div className="group bg-white border border-slate-200/80 rounded-2xl p-4 sm:p-5 shadow-xs hover:shadow-md hover:-translate-y-0.5 transition-all duration-200 ease-out flex items-center justify-between">
           <div>
-            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Recent Velocity (60m)</span>
-            <span className="text-2xl font-extrabold text-slate-900 font-mono tracking-tight mt-1 block">{kpiStats.recent60mCount}</span>
-          </div>
-          <div className="h-11 w-11 rounded-2xl bg-indigo-50 border border-indigo-150 flex items-center justify-center text-indigo-600 shadow-2xs">
-            <Activity className="h-5 w-5" />
-          </div>
-        </div>
-
-        <div className="bg-white border border-slate-200/80 rounded-2xl p-4 shadow-sm hover:border-slate-300 transition-all flex items-center justify-between">
-          <div>
-            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Auto-Out Alerts</span>
-            <span className={`text-2xl font-extrabold font-mono tracking-tight mt-1 block ${kpiStats.autoOutCount > 0 ? 'text-purple-600' : 'text-slate-900'}`}>
+            <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-1.5">
+              <ShieldAlert className="h-3 w-3 text-[#3b3492]" />
+              Auto-Out Alerts
+            </span>
+            <span className={`text-2xl sm:text-3xl font-black font-mono tracking-tight mt-1.5 block ${kpiStats.autoOutCount > 0 ? 'text-[#3b3492]' : 'text-slate-900'}`}>
               {kpiStats.autoOutCount}
             </span>
           </div>
-          <div className="h-11 w-11 rounded-2xl bg-purple-50 border border-purple-150 flex items-center justify-center text-purple-600 shadow-2xs">
+          <div className="h-11 w-11 rounded-2xl bg-[#eeedfa] border border-[#c7c4f0] flex items-center justify-center text-[#3b3492] shadow-2xs group-hover:scale-110 group-hover:rotate-3 transition-transform duration-200">
             <ShieldAlert className="h-5 w-5" />
           </div>
         </div>
@@ -114,13 +128,10 @@ export default function AttendanceLogsTable({
 
       {/* Main Table Container */}
       <div className="bg-white border border-slate-200 rounded-2xl shadow-sm flex flex-col">
-        {/* Table Header & Feature 2: Quick Filter Pill Controls */}
+        {/* Table Header & Quick Filter Pill Controls */}
         <div className="p-4 border-b border-slate-200 bg-slate-50/50 flex flex-col md:flex-row md:items-center justify-between gap-3">
           <div className="flex items-center gap-2">
-            <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider">Filtered Punch Logs</h3>
-            <span className="text-[10px] font-bold text-slate-500 font-mono bg-slate-100 border border-slate-200 px-2 py-0.5 rounded-lg">
-              Showing {paginatedLogs.length} of {logsFilteredBySearch.length}
-            </span>
+            <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider">Today's Live Punch Logs</h3>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
@@ -160,21 +171,82 @@ export default function AttendanceLogsTable({
         </div>
 
         {/* Table Content */}
-        <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse">
-            <thead>
-              <tr className="bg-slate-50/80 border-b border-slate-200 text-[10px] font-bold uppercase tracking-wider text-slate-500">
-                <th className="px-4 py-3">Log ID</th>
-                <th className="px-4 py-3">Employee & Designation</th>
-                <th className="px-4 py-3">Direction & Status</th>
-                <th className="px-4 py-3">Department</th>
-                <th className="px-4 py-3">Timestamp / Elapsed</th>
-                <th className="px-4 py-3 text-right">Actions</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-150 text-xs">
-              {paginatedLogs.length > 0 ? (
-                paginatedLogs.map((log) => {
+        {(() => {
+          const sortedPaginatedLogs = [...paginatedLogs].sort((a, b) => {
+            let valA, valB;
+            const empA = employees[a.employee_id] || { name: '', department: '' };
+            const empB = employees[b.employee_id] || { name: '', department: '' };
+
+            if (sortField === 'name') {
+              valA = empA.name.toLowerCase();
+              valB = empB.name.toLowerCase();
+            } else if (sortField === 'department') {
+              valA = empA.department.toLowerCase();
+              valB = empB.department.toLowerCase();
+            } else if (sortField === 'direction') {
+              valA = a.direction;
+              valB = b.direction;
+            } else if (sortField === 'log_id') {
+              valA = a.log_id;
+              valB = b.log_id;
+            } else {
+              valA = parseDBDate(a.timestamp).getTime();
+              valB = parseDBDate(b.timestamp).getTime();
+            }
+
+            if (valA < valB) return sortDirection === 'asc' ? -1 : 1;
+            if (valA > valB) return sortDirection === 'asc' ? 1 : -1;
+            return 0;
+          });
+
+          const renderSortIcon = (field) => {
+            if (sortField !== field) return <ArrowUpDown className="h-3 w-3 text-slate-300 ml-1 inline" />;
+            return sortDirection === 'asc' 
+              ? <ArrowUp className="h-3 w-3 text-blue-600 ml-1 inline" /> 
+              : <ArrowDown className="h-3 w-3 text-blue-600 ml-1 inline" />;
+          };
+
+          return (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="bg-slate-50/80 border-b border-slate-200 text-[10px] font-bold uppercase tracking-wider text-slate-500 select-none">
+                    <th 
+                      onClick={() => handleSortToggle('log_id')} 
+                      className="px-4 py-3 cursor-pointer hover:text-slate-900 transition-colors"
+                    >
+                      Log ID {renderSortIcon('log_id')}
+                    </th>
+                    <th 
+                      onClick={() => handleSortToggle('name')} 
+                      className="px-4 py-3 cursor-pointer hover:text-slate-900 transition-colors"
+                    >
+                      Employee & Designation {renderSortIcon('name')}
+                    </th>
+                    <th 
+                      onClick={() => handleSortToggle('direction')} 
+                      className="px-4 py-3 cursor-pointer hover:text-slate-900 transition-colors"
+                    >
+                      Direction & Status {renderSortIcon('direction')}
+                    </th>
+                    <th 
+                      onClick={() => handleSortToggle('department')} 
+                      className="px-4 py-3 cursor-pointer hover:text-slate-900 transition-colors"
+                    >
+                      Department {renderSortIcon('department')}
+                    </th>
+                    <th 
+                      onClick={() => handleSortToggle('timestamp')} 
+                      className="px-4 py-3 cursor-pointer hover:text-slate-900 transition-colors"
+                    >
+                      Timestamp / Elapsed {renderSortIcon('timestamp')}
+                    </th>
+                    <th className="px-4 py-3 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-150 text-xs">
+                  {sortedPaginatedLogs.length > 0 ? (
+                    sortedPaginatedLogs.map((log) => {
                   const emp = employees[log.employee_id] || { name: 'Unknown Employee', department: 'N/A' };
                   const isHighlight = log.log_id === highlightedLogId;
                   const logDate = parseDBDate(log.timestamp);
@@ -224,12 +296,12 @@ export default function AttendanceLogsTable({
                       {/* Feature 4: Direction + Anomaly Badges */}
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-1.5 flex-wrap">
-                          <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[9px] font-bold uppercase ${
+                          <span className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[9px] font-black uppercase tracking-wider ${
                             log.direction === 'IN' 
-                              ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' 
+                              ? 'bg-[#eaf7ed] text-[#15803d] border border-[#bbf7d0]' 
                               : log.direction === 'SYS_OUT' 
-                              ? 'bg-purple-50 text-purple-700 border border-purple-200' 
-                              : 'bg-rose-50 text-rose-700 border border-rose-200'
+                              ? 'bg-[#eeedfa] text-[#3b3492] border border-[#c7c4f0]' 
+                              : 'bg-[#f8fafc] text-[#475569] border border-[#e2e8f0]'
                           }`}>
                             {log.direction === 'IN' ? (
                               <ArrowDownLeft className="h-3 w-3" />
@@ -240,13 +312,13 @@ export default function AttendanceLogsTable({
                           </span>
 
                           {isLateIn && (
-                            <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200 text-[8px] font-extrabold uppercase" title="Clocked IN after 09:15 AM threshold">
+                            <span className="inline-flex items-center gap-0.5 px-2 py-0.5 rounded-full bg-[#fcf0f0] text-[#b91c1c] border border-[#fecaca] text-[8px] font-black uppercase tracking-wider" title="Clocked IN after 09:15 AM threshold">
                               ⏱️ LATE
                             </span>
                           )}
 
                           {log.direction === 'SYS_OUT' && (
-                            <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-purple-50 text-purple-700 border border-purple-200 text-[8px] font-extrabold uppercase" title="Virtual checkout generated by system">
+                            <span className="inline-flex items-center gap-0.5 px-2 py-0.5 rounded-full bg-[#eeedfa] text-[#3b3492] border border-[#c7c4f0] text-[8px] font-black uppercase tracking-wider" title="Virtual checkout generated by system">
                               ⚡ VIRTUAL
                             </span>
                           )}
@@ -295,6 +367,8 @@ export default function AttendanceLogsTable({
             </tbody>
           </table>
         </div>
+          );
+        })()}
 
         {/* Pagination Footer */}
         {totalLogsPages > 1 && (
@@ -324,3 +398,5 @@ export default function AttendanceLogsTable({
     </div>
   );
 }
+
+export default memo(AttendanceLogsTable);

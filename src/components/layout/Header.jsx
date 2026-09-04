@@ -1,8 +1,8 @@
-import React from 'react';
-import { Clock, RefreshCw, LogOut, Search, Users, BarChart3, FileText, ShieldCheck } from 'lucide-react';
+import React, { useState, useEffect, useRef, memo } from 'react';
+import { Clock, RefreshCw, LogOut, Search, Users, BarChart3, FileText, ShieldCheck, Settings, Menu, X } from 'lucide-react';
 import PWAInstallPrompt from '@/components/pwa/PWAInstallPrompt';
 
-export default function Header({
+function Header({
   isSupabaseMode,
   currentTime,
   triggerManualRefresh,
@@ -13,19 +13,52 @@ export default function Header({
   searchQuery,
   setSearchQuery
 }) {
+  const [liveTime, setLiveTime] = useState(() => currentTime || new Date());
+  const [isSearchOpen, setIsSearchOpen] = useState(false);
+  const searchInputRef = useRef(null);
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setLiveTime(new Date());
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  // Close search bar on outside click if search query is empty
+  useEffect(() => {
+    if (!isSearchOpen) return;
+    const handleOutsideClick = (e) => {
+      if (!e.target.closest('.universal-search-container')) {
+        if (!searchQuery) {
+          setIsSearchOpen(false);
+        }
+      }
+    };
+    const timer = setTimeout(() => {
+      document.addEventListener('click', handleOutsideClick);
+    }, 0);
+    return () => {
+      clearTimeout(timer);
+      document.removeEventListener('click', handleOutsideClick);
+    };
+  }, [isSearchOpen, searchQuery]);
+
   const tabs = [
+    { id: 'analytics', label: 'Analytics', icon: BarChart3 },
     { id: 'logs', label: 'Punch Logs', icon: Clock },
     { id: 'presence', label: 'Directory', icon: Users },
-    { id: 'analytics', label: 'Analytics', icon: BarChart3 },
     { id: 'admin', label: 'Admin Ops', icon: ShieldCheck },
-    { id: 'export', label: 'Reports', icon: FileText }
+    { id: 'export', label: 'Reports', icon: FileText },
+    { id: 'settings', label: 'Settings', icon: Settings }
   ];
 
   return (
-    <header className="bg-white/95 backdrop-blur-md border-b border-slate-200/80 sticky top-0 z-40">
-      <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 flex items-center h-14 gap-2 sm:gap-4">
-        
-        {/* Brand — always visible, text size adapts */}
+    <header className="lg:hidden bg-white/95 backdrop-blur-md border-b border-slate-200/80 sticky top-0 z-40 relative">
+      {/* DPI Logo Brand Accent Bar */}
+      <div className="h-0.5 bg-gradient-to-r from-[#3b3492] via-[#16a34a] to-[#dc2626] w-full"></div>
+      
+      <div className="max-w-[1700px] mx-auto px-3 sm:px-6 lg:px-8 xl:px-10 flex items-center h-14 justify-between gap-2">
+        {/* Left: Brand Logo & Title */}
         <div className="flex items-center gap-2 shrink-0">
           <div className="bg-white p-1 rounded-xl shadow-2xs border border-slate-200 shrink-0 w-8 h-8 flex items-center justify-center">
             <img src="/dpi.png" alt="DPI Logo" className="h-6 w-6 object-contain" />
@@ -54,98 +87,61 @@ export default function Header({
           </div>
         </div>
 
-        {/* Vertical Divider — desktop only */}
-        <div className="hidden sm:block w-px bg-slate-200/80 self-stretch my-2.5 shrink-0"></div>
-
-        {/* Desktop Center Tab Navigation — hidden on mobile (bottom nav handles it) */}
-        <nav className="hidden sm:flex items-center flex-1 gap-0.5 py-2.5 overflow-x-auto scrollbar-none">
-          {tabs.map((tab) => {
-            const Icon = tab.icon;
-            const isActive = activeTab === tab.id;
-            return (
+        {/* Right Controls: Universal Search + PWA Install */}
+        <div className="flex items-center gap-2 shrink-0">
+          {/* Universal Search Container */}
+          <div className="universal-search-container relative flex items-center">
+            {!(isSearchOpen || searchQuery) ? (
               <button
-                key={tab.id}
-                onClick={() => setActiveTab(tab.id)}
-                className={`relative flex items-center gap-1.5 px-2.5 lg:px-3 py-1.5 rounded-xl text-[11px] font-extrabold transition-all duration-150 cursor-pointer whitespace-nowrap group ${
-                  isActive
-                    ? 'bg-blue-600 text-white shadow-sm'
-                    : 'text-slate-500 hover:text-slate-800 hover:bg-slate-100/80'
-                }`}
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setIsSearchOpen(true);
+                  setTimeout(() => searchInputRef.current?.focus(), 50);
+                }}
+                className="h-8.5 w-8.5 rounded-full bg-slate-100 hover:bg-slate-200/80 text-slate-600 hover:text-slate-900 flex items-center justify-center transition-all cursor-pointer border border-slate-200/80 shadow-2xs group"
+                title="Search workforce logs & employees"
               >
-                <Icon className={`h-3.5 w-3.5 shrink-0 transition-transform duration-150 ${isActive ? '' : 'group-hover:scale-110'}`} />
-                {tab.label}
+                <Search className="h-4 w-4 transition-transform group-hover:scale-110" />
               </button>
-            );
-          })}
-        </nav>
-
-        {/* Vertical Divider — desktop only */}
-        <div className="hidden sm:block w-px bg-slate-200/80 self-stretch my-2.5 shrink-0"></div>
-
-        {/* Right Controls */}
-        <div className="flex items-center gap-1.5 sm:gap-2 ml-auto shrink-0">
-          {/* Inline Search — md+ only when on relevant tabs */}
-          {activeTab !== 'export' && activeTab !== 'analytics' && (
-            <div className="hidden md:flex relative w-36 lg:w-52">
-              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-slate-400" />
-              <input
-                type="text"
-                placeholder="Search..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full pl-8 pr-3 py-1.5 border border-slate-200 rounded-xl text-xs bg-slate-50 focus:bg-white text-slate-800 outline-none focus:border-blue-500 transition-all font-medium"
-              />
-            </div>
-          )}
-
-          {/* Clock — lg+ only */}
-          <div className="hidden lg:flex items-center space-x-1.5 bg-slate-50 px-3 py-1.5 rounded-full border border-slate-200/80 text-slate-700 text-xs font-bold shadow-2xs font-mono">
-            <Clock className="h-3.5 w-3.5 text-slate-400" />
-            <span>{currentTime.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })}</span>
+            ) : (
+              <div className="relative flex items-center w-48 sm:w-60 animate-fadeIn">
+                <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-blue-600 shrink-0 pointer-events-none" />
+                <input
+                  ref={searchInputRef}
+                  type="text"
+                  placeholder="Search workers or logs..."
+                  value={searchQuery}
+                  onChange={(e) => {
+                    setSearchQuery(e.target.value);
+                    if (activeTab === 'analytics' || activeTab === 'export') {
+                      setActiveTab('logs');
+                    }
+                  }}
+                  className="w-full pl-8 pr-7 py-1.5 border border-blue-400 focus:border-blue-600 rounded-full text-xs bg-white text-slate-900 outline-none ring-2 ring-blue-500/20 transition-all font-semibold shadow-2xs"
+                  autoFocus
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSearchQuery('');
+                    setIsSearchOpen(false);
+                  }}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 p-0.5 rounded-full cursor-pointer transition-colors"
+                  title="Clear search"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            )}
           </div>
 
           {/* PWA Install App Prompt / Badge */}
           <PWAInstallPrompt />
-
-          {/* Refresh */}
-          <button
-            type="button"
-            onClick={triggerManualRefresh}
-            disabled={isLoadingData}
-            className="flex items-center justify-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-full text-xs font-extrabold bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-50 transition-all shadow-2xs cursor-pointer"
-          >
-            <RefreshCw className={`h-3.5 w-3.5 shrink-0 ${isLoadingData ? 'animate-spin' : ''}`} />
-            <span className="hidden sm:inline">Sync</span>
-          </button>
-
-          {/* Logout */}
-          <button
-            type="button"
-            onClick={handleLogout}
-            className="flex items-center justify-center p-2 sm:px-3 sm:py-1.5 rounded-full text-xs font-bold text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200/80 transition-all cursor-pointer"
-            title="Log Out"
-          >
-            <LogOut className="h-3.5 w-3.5 shrink-0" />
-            <span className="hidden sm:inline ml-1">Exit</span>
-          </button>
         </div>
       </div>
-
-      {/* sm-only search bar — between sm and md where inline search isn't shown */}
-      {activeTab !== 'export' && activeTab !== 'analytics' && (
-        <div className="hidden sm:flex md:hidden items-center px-6 pb-2">
-          <div className="relative w-full">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-slate-400" />
-            <input
-              type="text"
-              placeholder="Search employee or ID..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full pl-8 pr-3 py-1.5 border border-slate-200 rounded-xl text-xs bg-slate-50 focus:bg-white text-slate-800 outline-none focus:border-blue-500 transition-all font-medium"
-            />
-          </div>
-        </div>
-      )}
     </header>
   );
 }
+
+export default memo(Header);

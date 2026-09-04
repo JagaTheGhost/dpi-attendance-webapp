@@ -38,6 +38,68 @@ export const exportAnalyticsToExcel = async ({
   XLSX.writeFile(wb, filename);
 };
 
+// Enterprise Multi-Sheet Excel Generator for Reports Page
+export const exportReportToMultiSheetExcel = async ({
+  reportTitle = 'REPORT',
+  headers = [],
+  rows = [],
+  companyName = 'DPI Attendance Systems',
+  filename = 'DPI_Report.xlsx',
+  metrics = {}
+}) => {
+  const XLSX = await import('xlsx');
+
+  const wb = XLSX.utils.book_new();
+
+  // Tab 1: Executive Summary Sheet
+  const summaryAOA = [
+    [companyName.toUpperCase()],
+    [reportTitle],
+    ['Generated On:', new Date().toLocaleString('en-IN')],
+    [''],
+    ['KEY PERFORMANCE INDICATORS'],
+    ['Metric', 'Value'],
+    ['Total Records Processed', metrics.totalRecords || rows.length],
+    ['Total Work Hours', `${metrics.totalWorkHours || 0} hrs`],
+    ['Total Overtime Hours', `${metrics.totalOvertimeHours || 0} hrs`],
+    ['Total Exceptions / Anomalies', metrics.anomalyCount || 0]
+  ];
+  const wsSummary = XLSX.utils.aoa_to_sheet(summaryAOA);
+
+  // Tab 2: Primary Report Dataset Sheet
+  const reportAOA = [headers, ...rows];
+  const wsReport = XLSX.utils.aoa_to_sheet(reportAOA);
+
+  // Tab 3: Biometric Exception Audit Sheet
+  const exceptions = rows.filter(r => r.some(cell => String(cell).includes('Missing') || String(cell).includes('Late') || String(cell) === 'A' || String(cell) === 'HD'));
+  const exceptionAOA = [headers, ...(exceptions.length > 0 ? exceptions : [rows[0] || []])];
+  const wsExceptions = XLSX.utils.aoa_to_sheet(exceptionAOA);
+
+  // Auto-fit column widths
+  [wsSummary, wsReport, wsExceptions].forEach(ws => {
+    const range = XLSX.utils.decode_range(ws['!ref'] || 'A1:A1');
+    const cols = [];
+    for (let C = range.s.c; C <= range.e.c; ++C) {
+      let maxLen = 10;
+      for (let R = range.s.r; R <= range.e.r; ++R) {
+        const cell = ws[XLSX.utils.encode_cell({ r: R, c: C })];
+        if (cell && cell.v) {
+          const len = cell.v.toString().length;
+          if (len > maxLen) maxLen = len;
+        }
+      }
+      cols.push({ wch: Math.min(maxLen + 3, 40) });
+    }
+    ws['!cols'] = cols;
+  });
+
+  XLSX.utils.book_append_sheet(wb, wsSummary, 'Executive Summary');
+  XLSX.utils.book_append_sheet(wb, wsReport, 'Report Dataset');
+  XLSX.utils.book_append_sheet(wb, wsExceptions, 'Exception Audit');
+
+  XLSX.writeFile(wb, filename);
+};
+
 // Helper: Load public/dpi.png logo as Base64 DataURL for PDF embedding
 const getDPILogoBase64 = async () => {
   try {
@@ -267,21 +329,34 @@ export const generateCustomPDFReport = async ({
             pdf.setTextColor(51, 65, 85);
             pdf.text(cellText, x, currentY + 4.8);
           }
-        } else if (headers[colIdx] === 'STATUS' || headers[colIdx] === 'EXCEPTION TYPE') {
+        } else if (cellText === 'P' || cellText === 'Present') {
+          pdf.setFillColor(236, 253, 245);
+          pdf.rect(x, currentY + 1.2, 14, 4.5, 'F');
           pdf.setFont('helvetica', 'bold');
           pdf.setFontSize(7);
-          if (cellText.includes('Late') || cellText.includes('Missing') || cellText.includes('Rapid')) {
-            pdf.setFillColor(254, 243, 199);
-            pdf.rect(x, currentY + 1.2, Math.min(35, cellText.length * 2.2 + 4), 4.5, 'F');
-            pdf.setTextColor(180, 83, 9);
-          } else if (cellText.includes('Present')) {
-            pdf.setFillColor(236, 253, 245);
-            pdf.rect(x, currentY + 1.2, 30, 4.5, 'F');
-            pdf.setTextColor(6, 95, 70);
-          } else {
-            pdf.setTextColor(71, 85, 105);
-          }
+          pdf.setTextColor(6, 95, 70);
+          pdf.text(cellText, x + 2.5, currentY + 4.5);
+        } else if (cellText === 'A' || cellText === 'Absent') {
+          pdf.setFillColor(254, 242, 242);
+          pdf.rect(x, currentY + 1.2, 14, 4.5, 'F');
+          pdf.setFont('helvetica', 'bold');
+          pdf.setFontSize(7);
+          pdf.setTextColor(153, 27, 27);
+          pdf.text(cellText, x + 2.5, currentY + 4.5);
+        } else if (cellText === 'HD' || cellText.includes('Missing') || cellText.includes('Late')) {
+          pdf.setFillColor(254, 243, 199);
+          pdf.rect(x, currentY + 1.2, Math.min(35, cellText.length * 2.2 + 4), 4.5, 'F');
+          pdf.setFont('helvetica', 'bold');
+          pdf.setFontSize(7);
+          pdf.setTextColor(146, 64, 14);
           pdf.text(cellText, x + 2, currentY + 4.5);
+        } else if (cellText === 'L' || cellText === 'OD') {
+          pdf.setFillColor(243, 232, 255);
+          pdf.rect(x, currentY + 1.2, 14, 4.5, 'F');
+          pdf.setFont('helvetica', 'bold');
+          pdf.setFontSize(7);
+          pdf.setTextColor(107, 33, 168);
+          pdf.text(cellText, x + 3, currentY + 4.5);
         } else if (headers[colIdx] === 'EMPLOYEE NAME' || headers[colIdx] === 'NAME' || headers[colIdx] === 'DEPARTMENT') {
           pdf.setFont('helvetica', 'bold');
           pdf.setFontSize(7.5);

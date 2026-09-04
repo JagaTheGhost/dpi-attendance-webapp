@@ -1,5 +1,5 @@
 import React from 'react';
-import { Download, X, Calendar, Clock, Award, ShieldCheck, UserCheck, AlertTriangle } from 'lucide-react';
+import { Download, X, Calendar, Clock, Award, ShieldCheck, UserCheck, AlertTriangle, FileText, CheckCircle2 } from 'lucide-react';
 
 export default function ProfileModal({
   selectedProfileEmpId,
@@ -8,12 +8,18 @@ export default function ProfileModal({
   employees,
   employeePresenceMap,
   handleDownloadIndividualPDF,
-  heatmapDays
+  heatmapDays,
+  adminLeaves = [],
+  adminODs = []
 }) {
   if (!selectedProfileEmpId || !selectedEmployeeAnalytics) return null;
 
   const emp = employees[selectedProfileEmpId] || { name: 'Employee', department: 'N/A' };
   const presence = employeePresenceMap[selectedProfileEmpId] || { status: 'OUT' };
+
+  // Filter Leave and OD records for this specific employee
+  const empLeaves = (adminLeaves || []).filter(l => String(l.empId).trim() === String(selectedProfileEmpId).trim());
+  const empODs = (adminODs || []).filter(o => String(o.empId).trim() === String(selectedProfileEmpId).trim());
 
   return (
     <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-md z-50 flex items-center justify-center p-2 sm:p-4 transition-all duration-300">
@@ -32,13 +38,21 @@ export default function ProfileModal({
             <div className="min-w-0">
               <div className="flex items-center gap-2 flex-wrap">
                 <h3 className="font-extrabold text-sm sm:text-base tracking-tight truncate">{emp.name}</h3>
-                <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[9px] sm:text-[10px] font-extrabold uppercase shrink-0 ${
-                  presence.status === 'IN' 
-                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' 
+                <span className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[9px] sm:text-[10px] font-extrabold uppercase shrink-0 ${
+                  presence.status === 'IN'
+                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                    : presence.status === 'LEAVE'
+                    ? 'bg-purple-500/20 text-purple-300 border border-purple-500/30'
+                    : presence.status === 'OD'
+                    ? 'bg-blue-500/20 text-blue-300 border border-blue-500/30'
                     : 'bg-slate-800 text-slate-400 border border-slate-700'
                 }`}>
-                  <span className={`h-1.5 w-1.5 rounded-full ${presence.status === 'IN' ? 'bg-emerald-400 animate-pulse' : 'bg-slate-500'}`}></span>
-                  {presence.status === 'IN' ? 'IN' : 'AWAY'}
+                  <span className={`h-1.5 w-1.5 rounded-full ${
+                    presence.status === 'IN' ? 'bg-emerald-400 animate-pulse' :
+                    presence.status === 'LEAVE' ? 'bg-purple-400' :
+                    presence.status === 'OD' ? 'bg-blue-400' : 'bg-slate-500'
+                  }`}></span>
+                  {presence.status === 'IN' ? 'IN' : presence.status === 'LEAVE' ? 'ON LEAVE' : presence.status === 'OD' ? 'ON DUTY' : 'AWAY'}
                 </span>
               </div>
               <p className="text-[10px] sm:text-xs text-slate-400 font-mono mt-0.5 truncate">
@@ -115,6 +129,56 @@ export default function ProfileModal({
                 <span className="font-extrabold text-slate-800 text-sm truncate block">{emp.verificationType === 'Finger or Face or Card or Password' ? 'Biometric' : (emp.verificationType || 'Biometric')}</span>
               </div>
             </div>
+          </div>
+
+          {/* Admin Leaves & OD Filings Section */}
+          <div className="bg-white border border-slate-200/80 rounded-[2rem] p-5 sm:p-7 shadow-sm space-y-4 relative overflow-hidden">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <h4 className="text-[10px] font-extrabold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+                <FileText className="h-4 w-4 text-purple-600" />
+                Admin Operations Approvals (Leaves & OD)
+              </h4>
+              <span className="text-[10px] font-bold text-purple-700 bg-purple-50 border border-purple-200/60 px-2.5 py-0.5 rounded-full">
+                {empLeaves.length + empODs.length} Record(s)
+              </span>
+            </div>
+
+            {empLeaves.length === 0 && empODs.length === 0 ? (
+              <div className="flex items-center gap-2 text-slate-400 text-xs py-2 italic font-medium">
+                <CheckCircle2 className="h-4 w-4 text-slate-300" />
+                No active or historical Leave/OD records found for this employee profile.
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {empLeaves.map((l, idx) => (
+                  <div key={`l-${idx}`} className="bg-purple-50/70 border border-purple-200/80 p-4 rounded-2xl flex flex-col justify-between space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="inline-flex px-2 py-0.5 rounded text-[9px] font-extrabold bg-purple-600 text-white uppercase tracking-wider">
+                        LEAVE • {l.leaveType || 'General'}
+                      </span>
+                      <span className="text-[10px] font-mono font-bold text-purple-900 bg-purple-100 px-2 py-0.5 rounded-md">
+                        {l.startDate} to {l.endDate}
+                      </span>
+                    </div>
+                    <p className="text-xs font-semibold text-purple-950">{l.reason || 'Approved Admin Leave'}</p>
+                  </div>
+                ))}
+
+                {empODs.map((o, idx) => (
+                  <div key={`o-${idx}`} className="bg-blue-50/70 border border-blue-200/80 p-4 rounded-2xl flex flex-col justify-between space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="inline-flex px-2 py-0.5 rounded text-[9px] font-extrabold bg-blue-600 text-white uppercase tracking-wider">
+                        ON DUTY (OD)
+                      </span>
+                      <span className="text-[10px] font-mono font-bold text-blue-900 bg-blue-100 px-2 py-0.5 rounded-md">
+                        {o.startDate} to {o.endDate}
+                      </span>
+                    </div>
+                    <p className="text-xs font-semibold text-blue-950">{o.reason || 'Approved On-Duty Assignment'}</p>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
           {/* Performance Analytics Gauge Section */}
@@ -225,19 +289,59 @@ export default function ProfileModal({
                 <Calendar className="h-4 w-4 text-blue-600" />
                 30-Day Attendance Timeline
               </h4>
-              <div className="flex flex-wrap items-center gap-3 sm:gap-4 text-[9px] font-bold text-slate-500 uppercase tracking-wider bg-slate-50/80 px-3 py-1.5 rounded-xl border border-slate-200">
-                <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-slate-200 border border-slate-300"></span> Absent</span>
-                <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.4)]"></span> Short Hrs</span>
-                <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.4)]"></span> Goal Met</span>
-                <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-white border-2 border-rose-400"></span> Late</span>
+
+              {/* Updated Heatmap Legend with Leave & OD */}
+              <div className="flex flex-wrap items-center gap-2.5 sm:gap-3 text-[9px] font-bold text-slate-500 uppercase tracking-wider bg-slate-50/80 px-3 py-1.5 rounded-xl border border-slate-200">
+                <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-full bg-slate-200 border border-slate-300"></span> Absent</span>
+                <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-full bg-purple-500 shadow-[0_0_6px_rgba(168,85,247,0.4)]"></span> Leave</span>
+                <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-full bg-blue-600 shadow-[0_0_6px_rgba(37,99,235,0.4)]"></span> OD</span>
+                <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-full bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.4)]"></span> Short Hrs</span>
+                <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.4)]"></span> Goal Met</span>
+                <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-full bg-white border-2 border-rose-400"></span> Late</span>
               </div>
             </div>
+
+            {/* 30-Day Tally Summary Pills Bar */}
+            {(() => {
+              let presentCount = 0, lateCount = 0, leaveCount = 0, odCount = 0, absentCount = 0;
+              heatmapDays.forEach(item => {
+                const dateISO = item.date.getFullYear() + '-' + String(item.date.getMonth() + 1).padStart(2, '0') + '-' + String(item.date.getDate()).padStart(2, '0');
+                const hasLeave = empLeaves.some(l => l.startDate <= dateISO && dateISO <= l.endDate);
+                const hasOD = empODs.some(o => o.startDate <= dateISO && dateISO <= o.endDate);
+                if (item.summary) {
+                  presentCount++;
+                  if (!item.summary.isOnTime) lateCount++;
+                } else if (hasLeave) {
+                  leaveCount++;
+                } else if (hasOD) {
+                  odCount++;
+                } else {
+                  absentCount++;
+                }
+              });
+              return (
+                <div className="flex flex-wrap items-center gap-2 text-xs font-bold font-mono text-slate-700 bg-slate-50 p-2.5 rounded-2xl border border-slate-150 justify-between">
+                  <span className="text-[10px] text-slate-400 uppercase tracking-wider font-sans font-extrabold">30-Day Tallies:</span>
+                  <div className="flex items-center gap-2 flex-wrap text-[11px]">
+                    <span className="bg-emerald-100/80 text-emerald-800 px-2 py-0.5 rounded-lg border border-emerald-200">Present: {presentCount}d</span>
+                    <span className="bg-rose-100/80 text-rose-800 px-2 py-0.5 rounded-lg border border-rose-200">Late: {lateCount}d</span>
+                    <span className="bg-purple-100/80 text-purple-800 px-2 py-0.5 rounded-lg border border-purple-200">Leaves: {leaveCount}d</span>
+                    <span className="bg-blue-100/80 text-blue-800 px-2 py-0.5 rounded-lg border border-blue-200">OD: {odCount}d</span>
+                    <span className="bg-slate-200/80 text-slate-700 px-2 py-0.5 rounded-lg border border-slate-300">Absent: {absentCount}d</span>
+                  </div>
+                </div>
+              );
+            })()}
 
             <div className="grid grid-cols-7 sm:grid-cols-10 md:grid-cols-15 gap-1.5 sm:gap-2">
               {heatmapDays.map((item, idx) => {
                 const { date, summary } = item;
                 const dateFormatted = date.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
+                const dateISO = date.getFullYear() + '-' + String(date.getMonth() + 1).padStart(2, '0') + '-' + String(date.getDate()).padStart(2, '0');
                 
+                const empLeave = empLeaves.find(l => l.startDate <= dateISO && dateISO <= l.endDate);
+                const empOD = empODs.find(o => o.startDate <= dateISO && dateISO <= o.endDate);
+
                 let bgClass = 'bg-slate-100 hover:bg-slate-200 text-slate-400 border-slate-200/50';
                 let borderClass = 'border-transparent';
                 let tooltipText = `${dateFormatted}: Absent (No Logs)`;
@@ -259,6 +363,12 @@ export default function ProfileModal({
                   }
                   
                   tooltipText = `${dateFormatted}: ${hrs}h ${mins}m worked | In: ${summary.firstIn} | Out: ${summary.lastOut} ${summary.isOnTime ? '(On-time)' : '(Late)'}`;
+                } else if (empLeave) {
+                  bgClass = 'bg-purple-500 hover:bg-purple-600 text-white shadow-[0_2px_10px_rgba(168,85,247,0.3)] border-purple-400';
+                  tooltipText = `${dateFormatted}: Approved Leave (${empLeave.leaveType || 'General'})`;
+                } else if (empOD) {
+                  bgClass = 'bg-blue-600 hover:bg-blue-700 text-white shadow-[0_2px_10px_rgba(37,99,235,0.3)] border-blue-500';
+                  tooltipText = `${dateFormatted}: On Duty Assignment (${empOD.reason || 'Client Visit/Site Work'})`;
                 }
 
                 return (

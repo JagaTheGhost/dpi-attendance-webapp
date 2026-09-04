@@ -27,7 +27,7 @@ export default function CustomDropdown({
 
   const selectedOption = options.find(opt => opt.value === value) || { label: value || placeholder };
 
-  const filteredOptions = (searchable && options.length > 6 && searchFilter.trim())
+  const filteredOptions = (searchable && searchFilter.trim())
     ? options.filter(opt => opt.label.toLowerCase().includes(searchFilter.toLowerCase()))
     : options;
 
@@ -47,13 +47,13 @@ export default function CustomDropdown({
 
       {isOpen && (
         <div className={`absolute left-0 right-0 mt-1.5 min-w-[200px] bg-white border border-slate-200/90 rounded-2xl shadow-xl z-50 p-1.5 animate-fadeIn ${menuClassName}`}>
-          {/* Optional Search filter if many options */}
-          {searchable && options.length > 6 && (
+          {/* Always render search filter if searchable is enabled */}
+          {searchable && (
             <div className="p-1 mb-1 border-b border-slate-100 relative">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-slate-400" />
               <input
                 type="text"
-                placeholder="Search..."
+                placeholder="Type to filter employee or ID..."
                 value={searchFilter}
                 onChange={(e) => setSearchFilter(e.target.value)}
                 className="w-full pl-8 pr-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs outline-none focus:bg-white focus:border-blue-500 font-medium"

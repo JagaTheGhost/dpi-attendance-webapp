@@ -1,119 +1,146 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, lazy, Suspense } from 'react';
 import { 
   Search, 
   Clock, 
-  ArrowUpRight, 
-  ArrowDownLeft, 
-  RefreshCw, 
   AlertCircle,
-  UserX,
-  Fingerprint,
-  Download,
-  Check,
-  ChevronDown,
-  AlertTriangle,
   BarChart3,
   Users,
   FileText,
-  ShieldCheck
+  ShieldCheck,
+  Settings
 } from 'lucide-react';
-import { supabase } from './supabaseClient';
-
 // Extracted Utilities & Constants
-import { STATIC_EMPLOYEES, INITIAL_LOGS, LOGS_PER_PAGE, EMPLOYEES_PER_PAGE } from '@/utils/constants';
+import { LOGS_PER_PAGE } from '@/utils/constants';
 import { parseDBDate, getDateRangeBounds } from '@/utils/dateUtils';
-import { chunkArray, injectVirtualLogs } from '@/utils/attendanceMath';
-import { exportAnalyticsToExcel, renderElementToPDF, generateCustomPDFReport, generateIndividualEmployeePDF } from '@/services/exportServices';
+import { injectVirtualLogs } from '@/utils/attendanceMath';
+import { exportAnalyticsToExcel, generateCustomPDFReport, generateIndividualEmployeePDF } from '@/services/exportServices';
 
 // Extracted Components
+// Custom Hooks
+import { useAttendanceData } from '@/hooks/useAttendanceData';
+import { useAdminOperations } from '@/hooks/useAdminOperations';
+import { usePresenceDirectory } from '@/hooks/usePresenceDirectory';
+import { useExportHub } from '@/hooks/useExportHub';
+
 import LoginView from '@/components/auth/LoginView';
 import SplashLoader from '@/components/auth/SplashLoader';
 import Header from '@/components/layout/Header';
-import AdminOperationsDashboard from '@/components/admin/AdminOperationsDashboard';
-import LiveRadarFeed from '@/components/attendance/LiveRadarFeed';
+import DesktopSidebar from '@/components/layout/DesktopSidebar';
 import AttendanceLogsTable from '@/components/attendance/AttendanceLogsTable';
-import PresenceDirectory from '@/components/employees/PresenceDirectory';
-import ProfileModal from '@/components/employees/ProfileModal';
-import AnalyticsDashboard from '@/components/analytics/AnalyticsDashboard';
-import ExportHubModal from '@/components/export/ExportHubModal';
+import Toast from '@/components/common/Toast';
+
+// Lazy Loaded Component Modules for Code-Splitting
+const AdminOperationsDashboard = lazy(() => import('@/components/admin/AdminOperationsDashboard'));
+const PresenceDirectory = lazy(() => import('@/components/employees/PresenceDirectory'));
+const ProfileModal = lazy(() => import('@/components/employees/ProfileModal'));
+const AnalyticsDashboard = lazy(() => import('@/components/analytics/AnalyticsDashboard'));
+const ExportHubModal = lazy(() => import('@/components/export/ExportHubModal'));
+const SettingsDashboard = lazy(() => import('@/components/settings/SettingsDashboard'));
+
+const ModuleLoader = () => (
+  <div className="flex items-center justify-center p-12 min-h-[350px]">
+    <div className="flex flex-col items-center gap-3">
+      <div className="w-8 h-8 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
+      <span className="text-sm font-medium text-slate-500">Loading module...</span>
+    </div>
+  </div>
+);
 
 export default function App() {
-  // State & Settings
-  const [employees, setEmployees] = useState(STATIC_EMPLOYEES);
-  const [logs, setLogs] = useState(INITIAL_LOGS);
-  
+  // Attendance Data Custom Hook
+  const {
+    employees,
+    setEmployees,
+    logs,
+    setLogs,
+    analyticsLogs,
+    isAnalyticsLoading,
+    hasHitQueryLimit,
+    queryLimitMessage,
+    isSupabaseMode,
+    isLoadingData,
+    dbError,
+    isInitializing,
+    isLoaderFading,
+    lastRefreshedTime,
+    highlightedLogId,
+    loadDatabaseData,
+    fetchEmployeeHistory,
+    fetchAnalyticsLogs
+  } = useAttendanceData();
+
+  // Admin Operations Custom Hook
+  const {
+    adminLeaves, setAdminLeaves,
+    adminODs, setAdminODs,
+    adminHolidays, setAdminHolidays,
+    manualPunches, setManualPunches,
+    shiftSchedules, setShiftSchedules
+  } = useAdminOperations();
+
+  // Export Hub Custom Hook
+  const {
+    exportReportType, setExportReportType,
+    exportDateRange, setExportDateRange,
+    exportStartDate, setExportStartDate,
+    exportEndDate, setExportEndDate,
+    exportEmployeeFilter, setExportEmployeeFilter,
+    exportSelectedEmployee, setExportSelectedEmployee,
+    exportSelectedEmployeesGroup, setExportSelectedEmployeesGroup,
+    exportGroupSearch, setExportGroupSearch,
+    exportSingleSearch, setExportSingleSearch,
+    hasInitializedGroup, setHasInitializedGroup,
+    pdfThemeColor, setPdfThemeColor,
+    pdfCompanyName, setPdfCompanyName,
+    pdfComments, setPdfComments,
+    pdfLogColumns, setPdfLogColumns,
+    pdfTimesheetColumns, setPdfTimesheetColumns,
+    isSingleDropdownOpen, setIsSingleDropdownOpen,
+    isGroupDropdownOpen, setIsGroupDropdownOpen,
+    isExportDateDropdownOpen, setIsExportDateDropdownOpen,
+    copySuccess, setCopySuccess,
+    exportSuccess, setExportSuccess
+  } = useExportHub();
+
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('All');
-  const [dateScope, setDateScope] = useState('today');
   const [currentTime, setCurrentTime] = useState(new Date());
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const [toasts, setToasts] = useState([]);
 
-  // Connection & loading states
-  const [isSupabaseMode, setIsSupabaseMode] = useState(false);
-  const [isLoadingData, setIsLoadingData] = useState(false);
-  const [dbError, setDbError] = useState(null);
+  const showToast = useCallback((msg, type = 'success') => {
+    const id = `toast-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
+    setToasts(prev => [...prev.slice(-4), { id, msg, type }]);
+  }, []);
+
+  const handleDismissToast = useCallback((id) => {
+    setToasts(prev => prev.filter(t => t.id !== id));
+  }, []);
 
   // Authentication & Splash states
   const [isAuthenticated, setIsAuthenticated] = useState(() => localStorage.getItem('dpi_authenticated') === 'true');
-  const [isInitializing, setIsInitializing] = useState(true);
-  const [isLoaderFading, setIsLoaderFading] = useState(false);
   const [isLoginFading, setIsLoginFading] = useState(false);
   const [loginUsername, setLoginUsername] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
   const [loginError, setLoginError] = useState(null);
   
-  // Navigation & Pagination state
-  const [activeTab, setActiveTab] = useState('logs');
-  const [activeChartTab, setActiveChartTab] = useState('hourly');
+  // Navigation & Pagination state with reload persistence
+  const [activeTab, setActiveTab] = useState(() => {
+    return localStorage.getItem('dpi_active_tab') || 'analytics';
+  });
+
+  useEffect(() => {
+    localStorage.setItem('dpi_active_tab', activeTab);
+  }, [activeTab]);
   const [logsPage, setLogsPage] = useState(1);
   const [presencePage, setPresencePage] = useState(1);
   const [selectedProfileEmpId, setSelectedProfileEmpId] = useState(null);
+  const [profileHistoryLogs, setProfileHistoryLogs] = useState(null);
   const [profileSort, setProfileSort] = useState('name');
+  const [profileSortDir, setProfileSortDir] = useState('desc');
   const [profileFilter, setProfileFilter] = useState('All');
   const [profileViewMode, setProfileViewMode] = useState('grid');
   const [profileItemsPerPage, setProfileItemsPerPage] = useState(8);
-
-  // Advanced Export Hub State
-  const [exportReportType, setExportReportType] = useState('logs');
-  const [exportDateRange, setExportDateRange] = useState('today');
-  const [exportStartDate, setExportStartDate] = useState(new Date().toISOString().slice(0, 10));
-  const [exportEndDate, setExportEndDate] = useState(new Date().toISOString().slice(0, 10));
-  
-  const [exportEmployeeFilter, setExportEmployeeFilter] = useState('all');
-  const [exportSelectedEmployee, setExportSelectedEmployee] = useState('');
-  const [exportSelectedEmployeesGroup, setExportSelectedEmployeesGroup] = useState([]);
-  const [exportGroupSearch, setExportGroupSearch] = useState('');
-  const [hasInitializedGroup, setHasInitializedGroup] = useState(false);
-
-  // Custom PDF Builder states
-  const [pdfThemeColor, setPdfThemeColor] = useState('blue');
-  const [pdfCompanyName, setPdfCompanyName] = useState('DPI Attendance Systems');
-  const [pdfComments, setPdfComments] = useState('Confidential. Generated from system logs.');
-  const [pdfLogColumns, setPdfLogColumns] = useState({
-    logId: true,
-    empId: true,
-    empName: true,
-    direction: true,
-    date: true,
-    time: true
-  });
-  const [pdfTimesheetColumns, setPdfTimesheetColumns] = useState({
-    empId: true,
-    empName: true,
-    daysPresent: true,
-    punchesCount: true,
-    totalHours: true,
-    totalBreakHours: true,
-    avgDailyHours: true,
-    goalStatus: true
-  });
-  const [pdfReportHtml, setPdfReportHtml] = useState(null);
-  const [isGeneratingPDF, setIsGeneratingPDF] = useState(false);
-
-  const [isSingleDropdownOpen, setIsSingleDropdownOpen] = useState(false);
-  const [isGroupDropdownOpen, setIsGroupDropdownOpen] = useState(false);
-  const [isStatusDropdownOpen, setIsStatusDropdownOpen] = useState(false);
-  const [isExportDateDropdownOpen, setIsExportDateDropdownOpen] = useState(false);
-  const [exportSingleSearch, setExportSingleSearch] = useState('');
 
   // Department, Leaves, and Analytics Filter States
   const [departmentFilter, setDepartmentFilter] = useState('All');
@@ -126,10 +153,16 @@ export default function App() {
   const [analyticsEndDate, setAnalyticsEndDate] = useState(() => {
     return new Date().toISOString().slice(0, 10);
   });
+
+  // Automatically sync custom date input fields when preset scope (week, 14days, 30days) changes
+  useEffect(() => {
+    if (analyticsDateScope === 'custom') return;
+    const { startISO, endISO } = getDateRangeBounds(analyticsDateScope);
+    setAnalyticsStartDate(startISO.slice(0, 10));
+    setAnalyticsEndDate(endISO.slice(0, 10));
+  }, [analyticsDateScope]);
   
   // Dropdowns UI state
-  const [isDeptDropdownOpen, setIsDeptDropdownOpen] = useState(false);
-  const [isAnalyticsDateDropdownOpen, setIsAnalyticsDateDropdownOpen] = useState(false);
   const [isProfileDeptDropdownOpen, setIsProfileDeptDropdownOpen] = useState(false);
   const [isProfileSortDropdownOpen, setIsProfileSortDropdownOpen] = useState(false);
   const [isProfileDensityDropdownOpen, setIsProfileDensityDropdownOpen] = useState(false);
@@ -139,10 +172,7 @@ export default function App() {
     const handleOutsideClick = (e) => {
       if (!e.target.closest('.single-dropdown-container')) setIsSingleDropdownOpen(false);
       if (!e.target.closest('.group-dropdown-container')) setIsGroupDropdownOpen(false);
-      if (!e.target.closest('.status-dropdown-container')) setIsStatusDropdownOpen(false);
       if (!e.target.closest('.export-date-dropdown-container')) setIsExportDateDropdownOpen(false);
-      if (!e.target.closest('.dept-dropdown-container')) setIsDeptDropdownOpen(false);
-      if (!e.target.closest('.analytics-date-dropdown-container')) setIsAnalyticsDateDropdownOpen(false);
       if (!e.target.closest('.profile-dept-dropdown-container')) setIsProfileDeptDropdownOpen(false);
       if (!e.target.closest('.profile-sort-dropdown-container')) setIsProfileSortDropdownOpen(false);
       if (!e.target.closest('.profile-density-dropdown-container')) setIsProfileDensityDropdownOpen(false);
@@ -151,13 +181,8 @@ export default function App() {
     return () => document.removeEventListener('click', handleOutsideClick);
   }, []);
 
-  const [previewLogs] = useState([]);
-  const [previewTimesheet] = useState([]);
   const [isPreviewLoading] = useState(false);
-
   const [isFetchingExportData] = useState(false);
-  const [copySuccess, setCopySuccess] = useState(false);
-  const [exportSuccess, setExportSuccess] = useState(false);
 
   useEffect(() => {
     const keys = Object.keys(employees);
@@ -170,153 +195,16 @@ export default function App() {
     }
   }, [employees, exportSelectedEmployee, hasInitializedGroup]);
 
-  const [, setLastRefreshedTime] = useState(new Date());
-  const [highlightedLogId, setHighlightedLogId] = useState(null);
-
-
-  // Live clock ticker
+  // Global attendance calculation clock ticker (1 minute interval)
   useEffect(() => {
-    const timer = setInterval(() => setCurrentTime(new Date()), 1000);
+    const timer = setInterval(() => setCurrentTime(new Date()), 60000);
     return () => clearInterval(timer);
   }, []);
 
   useEffect(() => {
     setLogsPage(1);
     setPresencePage(1);
-  }, [searchQuery, statusFilter, dateScope]);
-
-  // Supabase Initial Fetching
-  const loadDatabaseData = async (showLoadingIndicator = true) => {
-    if (!supabase) {
-      setTimeout(() => {
-        setIsLoaderFading(true);
-        setTimeout(() => {
-          setIsInitializing(false);
-          setIsLoaderFading(false);
-        }, 300);
-      }, 400);
-      return;
-    }
-
-    if (showLoadingIndicator) setIsLoadingData(true);
-    setDbError(null);
-    try {
-      const { data: deviceData } = await supabase.from('employee_devices').select('*');
-      const { data: empData } = await supabase.from('employees').select('*');
-
-      const employeeMap = {};
-
-      // 1. Process primary employee_devices table first
-      if (deviceData && deviceData.length > 0) {
-        deviceData.forEach(emp => {
-          if (emp.Company === 'X' || (emp.EmployeeName && emp.EmployeeName.startsWith('del_'))) return;
-
-          const empId = String(emp.EmployeeCode || emp.id).padStart(4, '0');
-          const rawCode = String(emp.EmployeeCode || emp.id);
-
-          const cleanSubDept = (!emp.SubDepartment || emp.SubDepartment === 'null') ? 'N/A' : emp.SubDepartment;
-          const cleanDOJ = (!emp.DOJ || emp.DOJ.startsWith('1900')) ? 'N/A' : emp.DOJ.slice(0, 10);
-          const cleanDOC = (!emp.DOC || emp.DOC.startsWith('1900')) ? 'N/A' : emp.DOC.slice(0, 10);
-
-          const record = {
-            id: empId,
-            name: emp.EmployeeName || `Employee ${empId}`,
-            department: emp.Department || 'General',
-            subDepartment: cleanSubDept,
-            designation: emp.Designation || 'Staff',
-            role: emp.Designation || 'Staff Member',
-            company: emp.Company || 'DPI',
-            employmentType: emp.EmploymentType || 'Permanent',
-            gender: (!emp.Gender || emp.Gender === 'null') ? 'N/A' : emp.Gender,
-            status: emp.Status || 'Working',
-            doj: cleanDOJ,
-            doc: cleanDOC,
-            verificationType: emp.VerificationType || 'Biometric',
-            avatar: `https://i.pravatar.cc/150?u=${empId}`
-          };
-
-          employeeMap[empId] = record;
-          if (rawCode !== empId) {
-            employeeMap[rawCode] = record;
-          }
-        });
-      }
-
-      // 2. Fallback to base employees table for any employee not in employee_devices
-      if (empData && empData.length > 0) {
-        empData.forEach(emp => {
-          if (emp.company_name === 'X' || (emp.name && emp.name.startsWith('del_'))) return;
-          const empId = String(emp.id).padStart(4, '0');
-          const rawId = String(emp.id);
-
-          if (!employeeMap[empId] && !employeeMap[rawId]) {
-            const fallbackRecord = {
-              id: empId,
-              name: emp.name,
-              department: emp.department || 'General',
-              subDepartment: 'N/A',
-              designation: 'Staff',
-              role: emp.role || 'Staff Member',
-              company: 'DPI',
-              employmentType: 'Permanent',
-              gender: 'N/A',
-              status: 'Working',
-              doj: 'N/A',
-              doc: 'N/A',
-              verificationType: 'Biometric',
-              avatar: emp.avatar || `https://i.pravatar.cc/150?u=${empId}`
-            };
-            employeeMap[empId] = fallbackRecord;
-            if (rawId !== empId) {
-              employeeMap[rawId] = fallbackRecord;
-            }
-          }
-        });
-      }
-
-      if (Object.keys(employeeMap).length > 0) {
-        setEmployees(employeeMap);
-      }
-
-
-
-      const { data: logsData, error: logsError } = await supabase
-        .from('biometric_logs')
-        .select('*')
-        .order('timestamp', { ascending: false })
-        .limit(2000);
-
-      if (logsError) throw logsError;
-
-      if (logsData) {
-        const formattedLogs = logsData
-          .filter(log => !employeeMap || employeeMap[log.employee_id])
-          .map(log => ({
-            log_id: `LOG-${log.id}`,
-            employee_id: log.employee_id,
-            timestamp: log.timestamp,
-            direction: log.direction
-          }));
-        setLogs(formattedLogs);
-      }
-
-      setIsSupabaseMode(true);
-      setLastRefreshedTime(new Date());
-    } catch (error) {
-      console.error("Failed to load data from Supabase:", error);
-      setDbError(error.message || "Database request failed.");
-      setIsSupabaseMode(false);
-    } finally {
-      if (showLoadingIndicator) setIsLoadingData(false);
-      setTimeout(() => {
-        setIsLoaderFading(true);
-        setTimeout(() => {
-          setIsInitializing(false);
-          setIsLoaderFading(false);
-        }, 300);
-      }, 600);
-    }
-  };
+  }, [searchQuery, statusFilter]);
 
   const handleLogin = (e) => {
     if (e) e.preventDefault();
@@ -331,81 +219,17 @@ export default function App() {
     }
   };
 
-  const handleLogout = () => {
+  const handleLogout = useCallback(() => {
     setIsAuthenticated(false);
     setLoginUsername('');
     setLoginPassword('');
     localStorage.removeItem('dpi_authenticated');
-  };
-
-  useEffect(() => {
-    loadDatabaseData(true);
-    const safetyTimer = setTimeout(() => {
-      setIsLoaderFading(true);
-      setTimeout(() => {
-        setIsInitializing(false);
-        setIsLoaderFading(false);
-      }, 300);
-    }, 2000);
-    return () => clearTimeout(safetyTimer);
   }, []);
 
-  // Realtime subscription
-  useEffect(() => {
-    if (!isSupabaseMode || !supabase) return;
-
-    const channel = supabase
-      .channel('realtime_biometric_logs')
-      .on(
-        'postgres_changes',
-        { event: 'INSERT', schema: 'public', table: 'biometric_logs' },
-        (payload) => {
-          if (!employees[payload.new.employee_id]) return;
-
-          const newLog = {
-            log_id: `LOG-${payload.new.id}`,
-            employee_id: payload.new.employee_id,
-            timestamp: payload.new.timestamp,
-            direction: payload.new.direction
-          };
-          
-          setLogs((prevLogs) => {
-            if (prevLogs.some(l => l.log_id === newLog.log_id)) return prevLogs;
-            setTimeout(() => {
-              setHighlightedLogId(newLog.log_id);
-              setLastRefreshedTime(new Date());
-            }, 0);
-            return [newLog, ...prevLogs];
-          });
-        }
-      )
-      .subscribe();
-
-    return () => supabase.removeChannel(channel);
-  }, [isSupabaseMode, employees]);
-
-  // 15 Mins Background Refresh
-  useEffect(() => {
-    if (!isSupabaseMode || !supabase) return;
-    const pollingInterval = setInterval(() => loadDatabaseData(false), 15 * 60 * 1000);
-    return () => clearInterval(pollingInterval);
-  }, [isSupabaseMode]);
-
-  const triggerManualRefresh = () => loadDatabaseData(true);
-
-  // Admin Operations State (Leaves, On Duty, Holidays, Manual Punches)
-  const [adminLeaves, setAdminLeaves] = useState(() => {
-    try { return JSON.parse(localStorage.getItem('dpi_admin_leaves')) || []; } catch { return []; }
-  });
-  const [adminODs, setAdminODs] = useState(() => {
-    try { return JSON.parse(localStorage.getItem('dpi_admin_ods')) || []; } catch { return []; }
-  });
-  const [adminHolidays, setAdminHolidays] = useState(() => {
-    try { return JSON.parse(localStorage.getItem('dpi_admin_holidays')) || []; } catch { return []; }
-  });
-  const [manualPunches, setManualPunches] = useState(() => {
-    try { return JSON.parse(localStorage.getItem('dpi_manual_punches')) || []; } catch { return []; }
-  });
+  const triggerManualRefresh = useCallback(() => {
+    loadDatabaseData(true);
+    showToast('Database synced successfully!', 'info');
+  }, [loadDatabaseData, showToast]);
 
   // Dynamic Processed Logs with Virtual System Outs & Manual Admin Punches
   const processedLogs = useMemo(() => {
@@ -420,139 +244,49 @@ export default function App() {
       ...logs
     ];
     return injectVirtualLogs(combinedLogs, currentTime);
-  }, [logs, manualPunches, currentTime.toDateString()]);
+  }, [logs, manualPunches, currentTime]);
 
-  const totalWorkforce = Object.keys(employees).length;
+  // Workforce Presence Directory Custom Hook
+  const {
+    totalWorkforce,
+    activeInOfficeCount,
+    employeePresenceMap,
+    filteredEmployeesList,
+    sortedAndFilteredProfiles,
+    profileSummaryStats
+  } = usePresenceDirectory({
+    employees,
+    processedLogs,
+    currentTime,
+    searchQuery,
+    statusFilter,
+    departmentFilter,
+    profileFilter,
+    profileSort,
+    profileSortDir,
+    adminLeaves,
+    adminODs
+  });
 
-  const activeInOfficeCount = useMemo(() => {
-    let activeCount = 0;
-    Object.keys(employees).forEach(empId => {
-      const lastLog = processedLogs.find(log => log.employee_id === empId);
-      if (lastLog && lastLog.direction === 'IN') activeCount++;
-    });
-    return activeCount;
-  }, [processedLogs, employees]);
+  // Fetch date-scoped analytics logs from Supabase when scope or custom date bounds change
+  useEffect(() => {
+    fetchAnalyticsLogs(analyticsDateScope, analyticsStartDate, analyticsEndDate);
+  }, [analyticsDateScope, analyticsStartDate, analyticsEndDate, fetchAnalyticsLogs]);
 
-  const absentRemoteCount = totalWorkforce - activeInOfficeCount;
-
-  // Presence Map Engine
-  const employeePresenceMap = useMemo(() => {
-    const map = {};
-    Object.keys(employees).forEach(empId => {
-      map[empId] = {
-        status: 'OUT',
-        lastPunchTime: null,
-        punchesToday: [],
-        hoursWorkedToday: 0,
-        formattedTime: '0h 0m'
-      };
-    });
-
-    const sortedLogs = [...processedLogs].reverse();
-    sortedLogs.forEach(log => {
-      const empId = log.employee_id;
-      if (!map[empId]) return;
-      const logDate = parseDBDate(log.timestamp);
-      const isToday = logDate.toDateString() === currentTime.toDateString();
-
-      map[empId].status = log.direction;
-      map[empId].lastPunchTime = log.timestamp;
-      if (isToday) map[empId].punchesToday.push(log);
-    });
-
-    Object.keys(map).forEach(empId => {
-      const data = map[empId];
-      const todayPunches = data.punchesToday;
-      let totalMs = 0;
-      let lastInTime = null;
-
-      todayPunches.forEach(punch => {
-        const time = parseDBDate(punch.timestamp);
-        if (punch.direction === 'IN') {
-          lastInTime = time;
-        } else if ((punch.direction === 'OUT' || punch.direction === 'SYS_OUT') && lastInTime) {
-          totalMs += (time - lastInTime);
-          lastInTime = null;
-        }
-      });
-
-      if (lastInTime) totalMs += (currentTime - lastInTime);
-
-      let breakMs = 0;
-      const firstInPunch = todayPunches.find(p => p.direction === 'IN');
-      if (firstInPunch) {
-        const firstInTime = parseDBDate(firstInPunch.timestamp);
-        const lastPunch = todayPunches[todayPunches.length - 1];
-        const endReferenceTime = lastPunch.direction === 'IN' ? currentTime : parseDBDate(lastPunch.timestamp);
-        const totalSpanMs = endReferenceTime - firstInTime;
-        breakMs = Math.max(0, totalSpanMs - totalMs);
-      }
-
-      const totalMinutes = Math.floor(totalMs / 1000 / 60);
-      const hrs = Math.floor(totalMinutes / 60);
-      const mins = totalMinutes % 60;
-
-      const totalBreakMinutes = Math.floor(breakMs / 1000 / 60);
-      const breakHrs = Math.floor(totalBreakMinutes / 60);
-      const breakMins = totalBreakMinutes % 60;
-
-      data.hoursWorkedToday = totalMs / 1000 / 60 / 60;
-      data.formattedTime = `${hrs}h ${mins}m`;
-      data.formattedBreakTime = `${breakHrs}h ${breakMins}m`;
-    });
-
-    return map;
-  }, [processedLogs, employees, currentTime]);
-
-  // Filtered employees list
-  const filteredEmployeesList = useMemo(() => {
-    return Object.entries(employees).filter(([empId, emp]) => {
-      const matchesDept = departmentFilter === 'All' || emp.department === departmentFilter;
-      const matchesSearch = searchQuery.trim() === '' || 
-        emp.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        empId.toLowerCase().includes(searchQuery.toLowerCase());
-      const statusData = employeePresenceMap[empId] || { status: 'OUT' };
-      const matchesStatus = statusFilter === 'All' || statusData.status === statusFilter;
-      return matchesDept && matchesSearch && matchesStatus;
-    });
-  }, [employees, searchQuery, statusFilter, employeePresenceMap, departmentFilter]);
-
-  const sortedAndFilteredProfiles = useMemo(() => {
-    let list = [...filteredEmployeesList];
-    if (profileFilter !== 'All') {
-      list = list.filter(([empId]) => {
-        const statusData = employeePresenceMap[empId] || { status: 'OUT', hoursWorkedToday: 0 };
-        const isInside = statusData.status === 'IN';
-        if (profileFilter === 'IN') return isInside;
-        if (profileFilter === 'OUT') return !isInside;
-        if (profileFilter === 'goalMet') return statusData.hoursWorkedToday >= 7;
-        if (profileFilter === 'overtime') return statusData.hoursWorkedToday > 9;
-        return true;
-      });
+  // On-demand employee history query when opening profile modal
+  useEffect(() => {
+    if (!selectedProfileEmpId) {
+      setProfileHistoryLogs(null);
+      return;
     }
-
-    list.sort(([idA, empA], [idB, empB]) => {
-      const statusA = employeePresenceMap[idA] || { status: 'OUT', hoursWorkedToday: 0 };
-      const statusB = employeePresenceMap[idB] || { status: 'OUT', hoursWorkedToday: 0 };
-      if (profileSort === 'name') return empA.name.localeCompare(empB.name);
-      if (profileSort === 'hours') return statusB.hoursWorkedToday - statusA.hoursWorkedToday;
-      if (profileSort === 'status') return (statusB.status === 'IN' ? 1 : 0) - (statusA.status === 'IN' ? 1 : 0);
-      return 0;
+    let isSubscribed = true;
+    fetchEmployeeHistory(selectedProfileEmpId).then(historyLogs => {
+      if (isSubscribed && historyLogs && historyLogs.length > 0) {
+        setProfileHistoryLogs(historyLogs);
+      }
     });
-
-    return list;
-  }, [filteredEmployeesList, profileFilter, profileSort, employeePresenceMap]);
-
-  const profileSummaryStats = useMemo(() => {
-    let present = 0, away = 0, late = 0, overtime = 0;
-    filteredEmployeesList.forEach(([empId]) => {
-      const statusData = employeePresenceMap[empId] || { status: 'OUT', hoursWorkedToday: 0 };
-      if (statusData.status === 'IN') present++; else away++;
-      if (statusData.hoursWorkedToday > 9) overtime++;
-    });
-
-    return { total: filteredEmployeesList.length, present, away, late, overtime };
-  }, [filteredEmployeesList, employeePresenceMap]);
+    return () => { isSubscribed = false; };
+  }, [selectedProfileEmpId, fetchEmployeeHistory]);
 
   // Analytics Computation Engine
   const analyticsData = useMemo(() => {
@@ -570,8 +304,9 @@ export default function App() {
 
     const totalDeptEmployees = Object.keys(targetEmployees).length || 1;
 
-    // Filter logs within range & matching department
-    const rangeLogs = processedLogs.filter(log => {
+    // Use date-scoped analytics logs from Supabase if available
+    const baseLogs = analyticsLogs.length > 0 ? analyticsLogs : processedLogs;
+    const rangeLogs = baseLogs.filter(log => {
       const logDate = parseDBDate(log.timestamp);
       return logDate >= startDateObj && logDate <= endDateObj && !!targetEmployees[log.employee_id];
     });
@@ -846,6 +581,48 @@ export default function App() {
     // Compute real averages
     const realAvgWorkingHours = totalWorkingSessions > 0 ? totalWorkingMinutes / totalWorkingSessions / 60 : 0;
     const realOvertimeHours = totalOvertimeMinutes / 60;
+    // Compute department-level comparative telemetry
+    const deptStats = {};
+    ['PF', 'NON PF', 'NI Group1', 'NI Group2'].forEach(dName => {
+      deptStats[dName] = {
+        name: dName,
+        totalWorkers: 0,
+        presentSet: new Set(),
+        lateCount: 0
+      };
+    });
+
+    Object.values(employees).forEach(emp => {
+      if (deptStats[emp.department]) {
+        deptStats[emp.department].totalWorkers++;
+      }
+    });
+
+    rangeLogs.forEach(log => {
+      const emp = employees[log.employee_id];
+      if (emp && deptStats[emp.department]) {
+        if (log.direction === 'IN') {
+          deptStats[emp.department].presentSet.add(log.employee_id);
+          const inTime = parseDBDate(log.timestamp);
+          const totalMins = inTime.getHours() * 60 + inTime.getMinutes();
+          if (totalMins > (9 * 60 + 15)) {
+            deptStats[emp.department].lateCount++;
+          }
+        }
+      }
+    });
+
+    const departmentComparison = Object.keys(deptStats).map(dName => {
+      const d = deptStats[dName];
+      const rate = d.totalWorkers > 0 ? Math.round((d.presentSet.size / d.totalWorkers) * 100) : 0;
+      return {
+        department: dName,
+        totalWorkers: d.totalWorkers,
+        presentCount: d.presentSet.size,
+        attendanceRate: rate,
+        lateCount: d.lateCount
+      };
+    });
 
     return {
       summary: {
@@ -860,19 +637,29 @@ export default function App() {
       },
       attendanceTrend: trendArray.length > 0 ? trendArray : [{ dateStr: new Date().toISOString(), dateLabel: 'Today', rate: 0, presentCount: 0, avgHours: 0 }],
       heatmapMatrix,
+      departmentComparison,
       leaderboard: {
         mostPunctual: punctualList.slice(0, 5),
         frequentlyLate: lateList.slice(0, 5)
       },
       exceptions
     };
-  }, [analyticsDateScope, analyticsStartDate, analyticsEndDate, employees, departmentFilter, processedLogs, activeInOfficeCount]);
+  }, [analyticsDateScope, analyticsStartDate, analyticsEndDate, employees, departmentFilter, processedLogs, analyticsLogs, activeInOfficeCount]);
 
-  // Logs Filtering & Pagination
+  // Logs Filtering & Pagination (Strict Current-Day Filtering for Live Punch Logs View)
   const logsFilteredBySearch = useMemo(() => {
+    const todayStr = currentTime.toDateString();
     return processedLogs.filter(log => {
+      if (!log || !log.timestamp || !log.employee_id) return false;
       const emp = employees[log.employee_id];
       if (!emp) return false;
+
+      // Security & Isolation: Enforce current-day filtering for the punch logs table
+      const logDate = parseDBDate(log.timestamp);
+      if (isNaN(logDate.getTime()) || logDate.toDateString() !== todayStr) {
+        return false;
+      }
+
       const matchesDept = departmentFilter === 'All' || emp.department === departmentFilter;
       const matchesSearch = searchQuery.trim() === '' || 
         emp.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -880,7 +667,7 @@ export default function App() {
       const matchesStatus = statusFilter === 'All' || log.direction === statusFilter;
       return matchesDept && matchesSearch && matchesStatus;
     });
-  }, [processedLogs, employees, searchQuery, statusFilter, departmentFilter]);
+  }, [processedLogs, employees, searchQuery, statusFilter, departmentFilter, currentTime]);
 
   const totalLogsPages = Math.ceil(logsFilteredBySearch.length / LOGS_PER_PAGE) || 1;
   const paginatedLogs = useMemo(() => {
@@ -895,10 +682,11 @@ export default function App() {
     return sortedAndFilteredProfiles.slice(start, start + profileItemsPerPage);
   }, [sortedAndFilteredProfiles, presencePage, profileItemsPerPage]);
 
-  // Selected Employee Detailed Analytics for Modal Drawer
+  // Selected Employee Detailed Analytics for Modal Drawer (Uses On-Demand Fetched History)
   const selectedEmployeeAnalytics = useMemo(() => {
     if (!selectedProfileEmpId) return null;
-    const empLogs = processedLogs.filter(log => log.employee_id === selectedProfileEmpId);
+    const sourceLogs = profileHistoryLogs || processedLogs;
+    const empLogs = sourceLogs.filter(log => log.employee_id === selectedProfileEmpId);
     const sorted = [...empLogs].sort((a, b) => parseDBDate(a.timestamp) - parseDBDate(b.timestamp));
 
     const logsByDay = {};
@@ -985,7 +773,7 @@ export default function App() {
       punctualityRate: daysPresentCount > 0 ? (onTimeDaysCount / daysPresentCount) * 100 : 0,
       daySummaries
     };
-  }, [selectedProfileEmpId, processedLogs, currentTime]);
+  }, [selectedProfileEmpId, processedLogs, profileHistoryLogs]);
 
   const heatmapDays = useMemo(() => {
     if (!selectedEmployeeAnalytics) return [];
@@ -1172,8 +960,23 @@ export default function App() {
     <div className="relative min-h-screen bg-slate-50 font-sans antialiased text-slate-800 flex flex-col overflow-x-hidden pb-[72px] sm:pb-0">
       {/* Main Dashboard UI */}
       {isAuthenticated && (
-        <div className="flex-1 flex flex-col animate-fadeIn">
-          {/* Extracted Navigation Header */}
+        <div className={`flex-1 flex flex-col animate-fadeIn transition-all duration-300 ${isSidebarCollapsed ? 'lg:pl-16' : 'lg:pl-60'}`}>
+          {/* Desktop Left Sidebar Navigation */}
+          <DesktopSidebar
+            isSupabaseMode={isSupabaseMode}
+            currentTime={currentTime}
+            triggerManualRefresh={triggerManualRefresh}
+            isLoadingData={isLoadingData}
+            handleLogout={handleLogout}
+            activeTab={activeTab}
+            setActiveTab={setActiveTab}
+            searchQuery={searchQuery}
+            setSearchQuery={setSearchQuery}
+            isCollapsed={isSidebarCollapsed}
+            setIsCollapsed={setIsSidebarCollapsed}
+          />
+
+          {/* Mobile/Tablet Top Header */}
           <Header
             isSupabaseMode={isSupabaseMode}
             currentTime={currentTime}
@@ -1187,7 +990,7 @@ export default function App() {
           />
 
           {/* Main Content Area */}
-          <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 flex flex-col gap-6">
+          <main className="flex-1 max-w-[1700px] w-full mx-auto px-4 sm:px-6 lg:px-8 xl:px-10 py-6 pb-24 lg:pb-6 flex flex-col gap-6">
             {dbError && (
               <div className="bg-rose-50 border border-rose-200 rounded-xl p-3 flex items-center justify-between text-rose-800 shadow-sm animate-flashRow">
                 <div className="flex items-center space-x-2.5">
@@ -1241,151 +1044,178 @@ export default function App() {
             </div>
 
             {/* Active Workspace Rendering */}
-            {activeTab === 'analytics' ? (
-              <AnalyticsDashboard
-                analyticsData={analyticsData}
-                departmentFilter={departmentFilter}
-                setDepartmentFilter={setDepartmentFilter}
-                analyticsDateScope={analyticsDateScope}
-                setAnalyticsDateScope={setAnalyticsDateScope}
-                analyticsStartDate={analyticsStartDate}
-                setAnalyticsStartDate={setAnalyticsStartDate}
-                analyticsEndDate={analyticsEndDate}
-                setAnalyticsEndDate={setAnalyticsEndDate}
-                onSelectEmployee={(empId) => setSelectedProfileEmpId(empId)}
-              />
-            ) : activeTab === 'admin' ? (
-              <AdminOperationsDashboard
-                employees={employees}
-                processedLogs={processedLogs}
-                adminLeaves={adminLeaves}
-                setAdminLeaves={setAdminLeaves}
-                adminODs={adminODs}
-                setAdminODs={setAdminODs}
-                adminHolidays={adminHolidays}
-                setAdminHolidays={setAdminHolidays}
-                manualPunches={manualPunches}
-                setManualPunches={setManualPunches}
-                onSelectEmployee={(empId) => setSelectedProfileEmpId(empId)}
-              />
-            ) : activeTab === 'export' ? (
-              <ExportHubModal
-                exportReportType={exportReportType}
-                setExportReportType={setExportReportType}
-                exportDateRange={exportDateRange}
-                setExportDateRange={setExportDateRange}
-                isExportDateDropdownOpen={isExportDateDropdownOpen}
-                setIsExportDateDropdownOpen={setIsExportDateDropdownOpen}
-                exportStartDate={exportStartDate}
-                setExportStartDate={setExportStartDate}
-                exportEndDate={exportEndDate}
-                setExportEndDate={setExportEndDate}
-                exportEmployeeFilter={exportEmployeeFilter}
-                setExportEmployeeFilter={setExportEmployeeFilter}
-                totalWorkforce={totalWorkforce}
-                exportSelectedEmployee={exportSelectedEmployee}
-                setExportSelectedEmployee={setExportSelectedEmployee}
-                isSingleDropdownOpen={isSingleDropdownOpen}
-                setIsSingleDropdownOpen={setIsSingleDropdownOpen}
-                exportSingleSearch={exportSingleSearch}
-                setExportSingleSearch={setExportSingleSearch}
-                exportSelectedEmployeesGroup={exportSelectedEmployeesGroup}
-                setExportSelectedEmployeesGroup={setExportSelectedEmployeesGroup}
-                isGroupDropdownOpen={isGroupDropdownOpen}
-                setIsGroupDropdownOpen={setIsGroupDropdownOpen}
-                exportGroupSearch={exportGroupSearch}
-                setExportGroupSearch={setExportGroupSearch}
-                employees={employees}
-                pdfThemeColor={pdfThemeColor}
-                setPdfThemeColor={setPdfThemeColor}
-                pdfCompanyName={pdfCompanyName}
-                setPdfCompanyName={setPdfCompanyName}
-                pdfComments={pdfComments}
-                setPdfComments={setPdfComments}
-                pdfLogColumns={pdfLogColumns}
-                setPdfLogColumns={setPdfLogColumns}
-                pdfTimesheetColumns={pdfTimesheetColumns}
-                setPdfTimesheetColumns={setPdfTimesheetColumns}
-                copySuccess={copySuccess}
-                exportSuccess={exportSuccess}
-                isFetchingExportData={isFetchingExportData}
-                isPreviewLoading={isPreviewLoading}
-                handleClipboardExport={handleClipboardExport}
-                handleDownloadExport={handleDownloadExport}
-                handleExportXLSX={handleExportXLSX}
-                handleDownloadPDFReport={handleDownloadPDFReport}
-                processedLogs={processedLogs}
-                departmentFilter={departmentFilter}
-                setDepartmentFilter={setDepartmentFilter}
-              />
-            ) : activeTab === 'presence' ? (
-              <PresenceDirectory
-                profileSummaryStats={profileSummaryStats}
-                sortedAndFilteredProfiles={sortedAndFilteredProfiles}
-                filteredEmployeesList={filteredEmployeesList}
-                searchQuery={searchQuery}
-                setSearchQuery={setSearchQuery}
-                departmentFilter={departmentFilter}
-                setDepartmentFilter={setDepartmentFilter}
-                isProfileDeptDropdownOpen={isProfileDeptDropdownOpen}
-                setIsProfileDeptDropdownOpen={setIsProfileDeptDropdownOpen}
-                profileFilter={profileFilter}
-                setProfileFilter={setProfileFilter}
-                profileSort={profileSort}
-                setProfileSort={setProfileSort}
-                isProfileSortDropdownOpen={isProfileSortDropdownOpen}
-                setIsProfileSortDropdownOpen={setIsProfileSortDropdownOpen}
-                profileItemsPerPage={profileItemsPerPage}
-                setProfileItemsPerPage={setProfileItemsPerPage}
-                isProfileDensityDropdownOpen={isProfileDensityDropdownOpen}
-                setIsProfileDensityDropdownOpen={setIsProfileDensityDropdownOpen}
-                profileViewMode={profileViewMode}
-                setProfileViewMode={setProfileViewMode}
-                presencePage={presencePage}
-                setPresencePage={setPresencePage}
-                totalPresencePages={totalPresencePages}
-                paginatedEmployees={paginatedEmployees}
-                employeePresenceMap={employeePresenceMap}
-                currentTime={currentTime}
-                setSelectedProfileEmpId={setSelectedProfileEmpId}
-                handleDownloadIndividualPDF={handleDownloadIndividualPDF}
-                getTimelineSegments={getTimelineSegments}
-              />
-            ) : (
-              /* Full Width Live Punch Logs Layout */
-              <div className="w-full">
-                <AttendanceLogsTable
-                  paginatedLogs={paginatedLogs}
-                  employees={employees}
-                  highlightedLogId={highlightedLogId}
-                  logsPage={logsPage}
-                  totalLogsPages={totalLogsPages}
-                  setLogsPage={setLogsPage}
-                  logsFilteredBySearch={logsFilteredBySearch}
-                  setSelectedProfileEmpId={setSelectedProfileEmpId}
-                  handleDownloadIndividualPDF={handleDownloadIndividualPDF}
-                  handleDownloadExport={handleDownloadExport}
-                  statusFilter={statusFilter}
-                  setStatusFilter={setStatusFilter}
+            <Suspense fallback={<ModuleLoader />}>
+              {activeTab === 'analytics' ? (
+                <AnalyticsDashboard
+                  analyticsData={analyticsData}
                   departmentFilter={departmentFilter}
                   setDepartmentFilter={setDepartmentFilter}
-                  activeInOfficeCount={activeInOfficeCount}
-                  totalWorkforce={totalWorkforce}
-                  currentTime={currentTime}
+                  analyticsDateScope={analyticsDateScope}
+                  setAnalyticsDateScope={setAnalyticsDateScope}
+                  analyticsStartDate={analyticsStartDate}
+                  setAnalyticsStartDate={setAnalyticsStartDate}
+                  analyticsEndDate={analyticsEndDate}
+                  setAnalyticsEndDate={setAnalyticsEndDate}
+                  onSelectEmployee={(empId) => setSelectedProfileEmpId(empId)}
+                  hasHitQueryLimit={hasHitQueryLimit}
+                  queryLimitMessage={queryLimitMessage}
+                  employees={employees}
+                  processedLogs={processedLogs}
                 />
-              </div>
-            )}
+              ) : activeTab === 'admin' ? (
+                <AdminOperationsDashboard
+                  employees={employees}
+                  processedLogs={processedLogs}
+                  adminLeaves={adminLeaves}
+                  setAdminLeaves={setAdminLeaves}
+                  adminODs={adminODs}
+                  setAdminODs={setAdminODs}
+                  adminHolidays={adminHolidays}
+                  setAdminHolidays={setAdminHolidays}
+                  manualPunches={manualPunches}
+                  setManualPunches={setManualPunches}
+                  shiftSchedules={shiftSchedules}
+                  setShiftSchedules={setShiftSchedules}
+                  onSelectEmployee={(empId) => setSelectedProfileEmpId(empId)}
+                />
+              ) : activeTab === 'export' ? (
+                <ExportHubModal
+                  exportReportType={exportReportType}
+                  setExportReportType={setExportReportType}
+                  exportDateRange={exportDateRange}
+                  setExportDateRange={setExportDateRange}
+                  isExportDateDropdownOpen={isExportDateDropdownOpen}
+                  setIsExportDateDropdownOpen={setIsExportDateDropdownOpen}
+                  exportStartDate={exportStartDate}
+                  setExportStartDate={setExportStartDate}
+                  exportEndDate={exportEndDate}
+                  setExportEndDate={setExportEndDate}
+                  exportEmployeeFilter={exportEmployeeFilter}
+                  setExportEmployeeFilter={setExportEmployeeFilter}
+                  totalWorkforce={totalWorkforce}
+                  exportSelectedEmployee={exportSelectedEmployee}
+                  setExportSelectedEmployee={setExportSelectedEmployee}
+                  isSingleDropdownOpen={isSingleDropdownOpen}
+                  setIsSingleDropdownOpen={setIsSingleDropdownOpen}
+                  exportSingleSearch={exportSingleSearch}
+                  setExportSingleSearch={setExportSingleSearch}
+                  exportSelectedEmployeesGroup={exportSelectedEmployeesGroup}
+                  setExportSelectedEmployeesGroup={setExportSelectedEmployeesGroup}
+                  isGroupDropdownOpen={isGroupDropdownOpen}
+                  setIsGroupDropdownOpen={setIsGroupDropdownOpen}
+                  exportGroupSearch={exportGroupSearch}
+                  setExportGroupSearch={setExportGroupSearch}
+                  employees={employees}
+                  pdfThemeColor={pdfThemeColor}
+                  setPdfThemeColor={setPdfThemeColor}
+                  pdfCompanyName={pdfCompanyName}
+                  setPdfCompanyName={setPdfCompanyName}
+                  pdfComments={pdfComments}
+                  setPdfComments={setPdfComments}
+                  pdfLogColumns={pdfLogColumns}
+                  setPdfLogColumns={setPdfLogColumns}
+                  pdfTimesheetColumns={pdfTimesheetColumns}
+                  setPdfTimesheetColumns={setPdfTimesheetColumns}
+                  copySuccess={copySuccess}
+                  exportSuccess={exportSuccess}
+                  isFetchingExportData={isFetchingExportData}
+                  isPreviewLoading={isPreviewLoading}
+                  handleClipboardExport={handleClipboardExport}
+                  handleDownloadExport={handleDownloadExport}
+                  handleExportXLSX={handleExportXLSX}
+                  handleDownloadPDFReport={handleDownloadPDFReport}
+                  processedLogs={processedLogs}
+                  departmentFilter={departmentFilter}
+                  setDepartmentFilter={setDepartmentFilter}
+                />
+              ) : activeTab === 'presence' ? (
+                <PresenceDirectory
+                  profileSummaryStats={profileSummaryStats}
+                  sortedAndFilteredProfiles={sortedAndFilteredProfiles}
+                  filteredEmployeesList={filteredEmployeesList}
+                  searchQuery={searchQuery}
+                  setSearchQuery={setSearchQuery}
+                  departmentFilter={departmentFilter}
+                  setDepartmentFilter={setDepartmentFilter}
+                  isProfileDeptDropdownOpen={isProfileDeptDropdownOpen}
+                  setIsProfileDeptDropdownOpen={setIsProfileDeptDropdownOpen}
+                  profileFilter={profileFilter}
+                  setProfileFilter={setProfileFilter}
+                  profileSort={profileSort}
+                  setProfileSort={setProfileSort}
+                  profileSortDir={profileSortDir}
+                  setProfileSortDir={setProfileSortDir}
+                  isProfileSortDropdownOpen={isProfileSortDropdownOpen}
+                  setIsProfileSortDropdownOpen={setIsProfileSortDropdownOpen}
+                  profileItemsPerPage={profileItemsPerPage}
+                  setProfileItemsPerPage={setProfileItemsPerPage}
+                  isProfileDensityDropdownOpen={isProfileDensityDropdownOpen}
+                  setIsProfileDensityDropdownOpen={setIsProfileDensityDropdownOpen}
+                  profileViewMode={profileViewMode}
+                  setProfileViewMode={setProfileViewMode}
+                  presencePage={presencePage}
+                  setPresencePage={setPresencePage}
+                  totalPresencePages={totalPresencePages}
+                  paginatedEmployees={paginatedEmployees}
+                  employeePresenceMap={employeePresenceMap}
+                  currentTime={currentTime}
+                  setSelectedProfileEmpId={setSelectedProfileEmpId}
+                  handleDownloadIndividualPDF={handleDownloadIndividualPDF}
+                  getTimelineSegments={getTimelineSegments}
+                />
+              ) : activeTab === 'settings' ? (
+                <SettingsDashboard
+                  isSupabaseMode={isSupabaseMode}
+                  triggerManualRefresh={triggerManualRefresh}
+                  isLoadingData={isLoadingData}
+                  dbError={dbError}
+                  lastRefreshedTime={lastRefreshedTime}
+                  processedLogsCount={processedLogs.length}
+                  employeesCount={totalWorkforce}
+                  pdfCompanyName={pdfCompanyName}
+                  setPdfCompanyName={setPdfCompanyName}
+                  pdfThemeColor={pdfThemeColor}
+                  setPdfThemeColor={setPdfThemeColor}
+                  handleLogout={handleLogout}
+                  showToast={showToast}
+                />
+              ) : (
+                /* Full Width Live Punch Logs Layout */
+                <div className="w-full">
+                  <AttendanceLogsTable
+                    paginatedLogs={paginatedLogs}
+                    employees={employees}
+                    highlightedLogId={highlightedLogId}
+                    logsPage={logsPage}
+                    totalLogsPages={totalLogsPages}
+                    setLogsPage={setLogsPage}
+                    logsFilteredBySearch={logsFilteredBySearch}
+                    setSelectedProfileEmpId={setSelectedProfileEmpId}
+                    handleDownloadIndividualPDF={handleDownloadIndividualPDF}
+                    handleDownloadExport={handleDownloadExport}
+                    statusFilter={statusFilter}
+                    setStatusFilter={setStatusFilter}
+                    departmentFilter={departmentFilter}
+                    setDepartmentFilter={setDepartmentFilter}
+                    activeInOfficeCount={activeInOfficeCount}
+                    totalWorkforce={totalWorkforce}
+                    currentTime={currentTime}
+                  />
+                </div>
+              )}
+            </Suspense>
           </main>
 
-          {/* Mobile Sticky Bottom Navigation Bar */}
-          <nav className="sm:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-md border-t border-slate-200/80 shadow-[0_-4px_24px_rgba(0,0,0,0.06)]">
+          {/* Mobile & Tablet Sticky Bottom Navigation Bar (< 1024px) */}
+          <nav className="lg:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-md border-t border-slate-200/80 shadow-[0_-4px_24px_rgba(0,0,0,0.06)]">
             <div className="flex items-stretch h-[72px] px-2">
               {[
                 { id: 'logs', label: 'Logs', icon: Clock },
                 { id: 'presence', label: 'Directory', icon: Users },
                 { id: 'analytics', label: 'Analytics', icon: BarChart3 },
                 { id: 'admin', label: 'Admin', icon: ShieldCheck },
-                { id: 'export', label: 'Reports', icon: FileText }
+                { id: 'export', label: 'Reports', icon: FileText },
+                { id: 'settings', label: 'Settings', icon: Settings }
               ].map((tab) => {
                 const Icon = tab.icon;
                 const isActive = activeTab === tab.id;
@@ -1411,7 +1241,7 @@ export default function App() {
 
           {/* Footer */}
           <footer className="bg-white border-t border-slate-200 py-5 text-center text-xs text-slate-400 mt-12">
-            <div className="max-w-7xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-4">
+            <div className="max-w-[1700px] mx-auto px-4 sm:px-6 lg:px-8 xl:px-10 flex flex-col sm:flex-row items-center justify-between gap-4">
               <p>© {new Date().getFullYear()} DPI Biometric Attendance Radar. Realtime database integration.</p>
               <div className="flex items-center space-x-2 text-slate-500 font-medium">
                 <span className="h-1.5 w-1.5 bg-blue-600 rounded-full animate-ping"></span>
@@ -1423,15 +1253,19 @@ export default function App() {
       )}
 
       {/* Extracted Modal & Authentication Overlays */}
-      <ProfileModal
-        selectedProfileEmpId={selectedProfileEmpId}
-        setSelectedProfileEmpId={setSelectedProfileEmpId}
-        selectedEmployeeAnalytics={selectedEmployeeAnalytics}
-        employees={employees}
-        employeePresenceMap={employeePresenceMap}
-        handleDownloadIndividualPDF={handleDownloadIndividualPDF}
-        heatmapDays={heatmapDays}
-      />
+      <Suspense fallback={null}>
+        <ProfileModal
+          selectedProfileEmpId={selectedProfileEmpId}
+          setSelectedProfileEmpId={setSelectedProfileEmpId}
+          selectedEmployeeAnalytics={selectedEmployeeAnalytics}
+          employees={employees}
+          employeePresenceMap={employeePresenceMap}
+          handleDownloadIndividualPDF={handleDownloadIndividualPDF}
+          heatmapDays={heatmapDays}
+          adminLeaves={adminLeaves}
+          adminODs={adminODs}
+        />
+      </Suspense>
 
       <LoginView
         showLogin={showLogin}
@@ -1448,6 +1282,9 @@ export default function App() {
         showLoader={showLoader}
         isLoaderFading={isLoaderFading}
       />
+
+      {/* Global Toast Stacking Queue Notification System */}
+      <Toast toasts={toasts} onDismiss={handleDismissToast} />
     </div>
   );
 }

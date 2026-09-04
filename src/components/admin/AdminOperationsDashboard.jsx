@@ -21,10 +21,16 @@ import {
   ChevronRight,
   Download,
   Palmtree,
-  Wrench
+  Wrench,
+  Sliders,
+  Sun,
+  Moon,
+  Layers
 } from 'lucide-react';
 import CustomDropdown from '@/components/common/CustomDropdown';
+import Toast from '@/components/common/Toast';
 import { generateHolidayNoticePDF, generateSingleHolidayNoticePDF } from '@/services/exportServices';
+import { supabase } from '@/supabaseClient';
 
 export default function AdminOperationsDashboard({
   employees = {},
@@ -37,14 +43,20 @@ export default function AdminOperationsDashboard({
   setAdminHolidays,
   manualPunches = [],
   setManualPunches,
+  shiftSchedules = [],
+  setShiftSchedules,
   onSelectEmployee
 }) {
   const [activeSubTab, setActiveSubTab] = useState('leaves'); // 'leaves' | 'od' | 'regularization' | 'holidays'
-  const [notification, setNotification] = useState(null);
+  const [toasts, setToasts] = useState([]);
 
   const showToast = (msg, type = 'success') => {
-    setNotification({ msg, type });
-    setTimeout(() => setNotification(null), 3000);
+    const id = `toast-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
+    setToasts(prev => [...prev.slice(-4), { id, msg, type }]);
+  };
+
+  const handleDismissToast = (id) => {
+    setToasts(prev => prev.filter(t => t.id !== id));
   };
 
   const todayStr = new Date().toISOString().split('T')[0];
@@ -103,7 +115,156 @@ export default function AdminOperationsDashboard({
   // Search & Filter state for management tables
   const [adminSearchQuery, setAdminSearchQuery] = useState('');
 
-  // Handlers
+  // Shift Timing Form States
+  const [shiftScopeType, setShiftScopeType] = useState('Department');
+  const [shiftTarget, setShiftTarget] = useState('Production');
+  const [shiftPreset, setShiftPreset] = useState('General Day Shift (09:00 - 18:00)');
+  const [shiftStartTime, setShiftStartTime] = useState('09:00');
+  const [shiftEndTime, setShiftEndTime] = useState('18:00');
+  const [shiftGraceMinutes, setShiftGraceMinutes] = useState(15);
+  const [shiftStartDate, setShiftStartDate] = useState(todayStr);
+  const [shiftEndDate, setShiftEndDate] = useState('2026-12-31');
+
+  // Available unique Departments & Designations from employees list
+  const availableDepartments = React.useMemo(() => {
+    const set = new Set(Object.values(employees).map(e => e.department).filter(Boolean));
+    return ['All Departments', ...Array.from(set)];
+  }, [employees]);
+
+  const availableDesignations = React.useMemo(() => {
+    const set = new Set(Object.values(employees).map(e => e.designation).filter(Boolean));
+    return ['All Designations', ...Array.from(set)];
+  }, [employees]);
+
+  // Optimistic Async Background Sync Helper (0ms UI latency + Cloud Persistence)
+  const syncRecordToSupabase = async (tableName, record) => {
+    if (!supabase || !record) return;
+    try {
+      // Build clean payload with ONLY lowercase keys matching PostgreSQL schema
+      const payload = {};
+      Object.keys(record).forEach(key => {
+        const lowerKey = key.toLowerCase();
+        payload[lowerKey] = record[key];
+      });
+
+      const { error } = await supabase.from(tableName).insert([payload]);
+      if (error && !error.message.includes('404')) {
+        console.warn(`Background DB Sync notice (${tableName}):`, error.message);
+      }
+    } catch (err) {
+      // Gracefully handle offline or missing table exceptions
+    }
+  };
+
+  const deleteRecordFromSupabase = async (tableName, id) => {
+    if (!supabase || !id) return;
+    try {
+      const { error } = await supabase.from(tableName).delete().eq('id', id);
+      if (error && !error.message.includes('404')) {
+        console.warn(`Background DB Delete notice (${tableName}):`, error.message);
+      }
+    } catch (err) {
+      // Gracefully handle offline or missing table exceptions
+    }
+  };
+
+  // 1-Click Batch Regularization Assistant Calculation (Detects missing OUT punches)
+  const unresolvedMissingOuts = React.useMemo(() => {
+    const missing = [];
+    const logsByEmp = {};
+    processedLogs.forEach(l => {
+      if (!logsByEmp[l.employee_id]) logsByEmp[l.employee_id] = [];
+      logsByEmp[l.employee_id].push(l);
+    });
+
+    Object.keys(logsByEmp).forEach(empId => {
+      const emp = employees[empId];
+      if (!emp) return;
+      const empLogs = logsByEmp[empId];
+      const hasIn = empLogs.some(l => l.direction === 'IN');
+      const hasOut = empLogs.some(l => l.direction === 'OUT');
+      const hasManualOut = manualPunches.some(mp => mp.empId === empId && mp.direction === 'OUT');
+
+      if (hasIn && !hasOut && !hasManualOut) {
+        const firstIn = empLogs.find(l => l.direction === 'IN');
+        missing.push({
+          empId,
+          name: emp.name,
+          department: emp.department || 'General',
+          dateStr: firstIn ? new Date(firstIn.timestamp).toISOString().split('T')[0] : todayStr
+        });
+      }
+    });
+    return missing;
+  }, [processedLogs, employees, manualPunches, todayStr]);
+
+  const handleBatchRegularize = () => {
+    if (unresolvedMissingOuts.length === 0) return;
+    const nowIso = new Date().toISOString();
+    const newPunches = [];
+
+    unresolvedMissingOuts.forEach(emp => {
+      const punchRecord = {
+        id: `MP-BATCH-${Date.now()}-${emp.empId}`,
+        empId: emp.empId,
+        empName: emp.name,
+        department: emp.department,
+        designation: 'Staff',
+        timestamp: new Date(`${emp.dateStr}T18:00:00`).toISOString(),
+        dateStr: emp.dateStr,
+        timeStr: '18:00',
+        direction: 'OUT',
+        reason: '1-Click Batch Regularized (06:00 PM)',
+        createdAt: nowIso
+      };
+      newPunches.push(punchRecord);
+      syncRecordToSupabase('manual_punches', punchRecord);
+    });
+
+    const updated = [...newPunches, ...manualPunches];
+    setManualPunches(updated);
+    localStorage.setItem('dpi_manual_punches', JSON.stringify(updated));
+    showToast(`Batch regularized ${newPunches.length} missing OUT(s) to 06:00 PM!`);
+  };
+
+  // Handlers for Shift Timing Assignment
+  const handleAssignShift = (e) => {
+    e.preventDefault();
+    let targetLabel = shiftTarget;
+    if (shiftScopeType === 'Employee') {
+      const emp = employees[shiftTarget];
+      targetLabel = emp ? `${emp.name} (${emp.id})` : shiftTarget;
+    }
+
+    const newShift = {
+      id: `SHIFT-${Date.now()}`,
+      scopeType: shiftScopeType,
+      targetName: targetLabel,
+      targetId: shiftTarget,
+      shiftName: shiftPreset.split(' (')[0],
+      startTime: shiftStartTime,
+      endTime: shiftEndTime,
+      graceMinutes: Number(shiftGraceMinutes) || 15,
+      startDate: shiftStartDate,
+      endDate: shiftEndDate || 'Ongoing',
+      createdAt: new Date().toISOString()
+    };
+
+    const updated = [newShift, ...shiftSchedules];
+    setShiftSchedules(updated);
+    localStorage.setItem('dpi_shift_schedules', JSON.stringify(updated));
+    syncRecordToSupabase('shift_schedules', newShift);
+    showToast(`Shift assigned to ${targetLabel} (${shiftStartTime} - ${shiftEndTime})`);
+  };
+
+  const handleRevokeShift = (id) => {
+    const updated = shiftSchedules.filter(s => s.id !== id);
+    setShiftSchedules(updated);
+    localStorage.setItem('dpi_shift_schedules', JSON.stringify(updated));
+    deleteRecordFromSupabase('shift_schedules', id);
+    showToast('Shift timing schedule revoked', 'info');
+  };
+
   const handleAssignLeave = (e) => {
     e.preventDefault();
     if (!leaveEmpId) {
@@ -129,6 +290,7 @@ export default function AdminOperationsDashboard({
     const updated = [newLeave, ...adminLeaves];
     setAdminLeaves(updated);
     localStorage.setItem('dpi_admin_leaves', JSON.stringify(updated));
+    syncRecordToSupabase('admin_leaves', newLeave);
     showToast(`Leave granted to ${emp.name} (${leaveType})`);
     setLeaveReason('');
   };
@@ -137,6 +299,7 @@ export default function AdminOperationsDashboard({
     const updated = adminLeaves.filter(l => l.id !== id);
     setAdminLeaves(updated);
     localStorage.setItem('dpi_admin_leaves', JSON.stringify(updated));
+    deleteRecordFromSupabase('admin_leaves', id);
     showToast('Leave entry revoked', 'info');
   };
 
@@ -169,6 +332,7 @@ export default function AdminOperationsDashboard({
     const updated = [newRecord, ...adminODs];
     setAdminODs(updated);
     localStorage.setItem('dpi_admin_ods', JSON.stringify(updated));
+    syncRecordToSupabase('admin_ods', newRecord);
     showToast(`On Duty logged for ${emp.name} at ${odLocation}`);
     setOdLocation('');
     setOdReason('');
@@ -178,6 +342,7 @@ export default function AdminOperationsDashboard({
     const updated = adminODs.filter(o => o.id !== id);
     setAdminODs(updated);
     localStorage.setItem('dpi_admin_ods', JSON.stringify(updated));
+    deleteRecordFromSupabase('admin_ods', id);
     showToast('On Duty entry revoked', 'info');
   };
 
@@ -209,6 +374,7 @@ export default function AdminOperationsDashboard({
     const updated = [newPunch, ...manualPunches];
     setManualPunches(updated);
     localStorage.setItem('dpi_manual_punches', JSON.stringify(updated));
+    syncRecordToSupabase('manual_punches', newPunch);
     showToast(`Manual ${punchDirection} punch added for ${emp.name} at ${punchTime}`);
   };
 
@@ -216,6 +382,7 @@ export default function AdminOperationsDashboard({
     const updated = manualPunches.filter(p => p.id !== id);
     setManualPunches(updated);
     localStorage.setItem('dpi_manual_punches', JSON.stringify(updated));
+    deleteRecordFromSupabase('manual_punches', id);
     showToast('Manual punch deleted', 'info');
   };
 
@@ -241,7 +408,7 @@ export default function AdminOperationsDashboard({
     while (current <= end) {
       const dateStr = current.toISOString().split('T')[0];
       if (!adminHolidays.some(h => h.date === dateStr)) {
-        newHolidays.push({
+        const holObj = {
           id: `HOL-${Date.now()}-${dayCount}`,
           title: holidayTitle.trim(),
           date: dateStr,
@@ -250,7 +417,9 @@ export default function AdminOperationsDashboard({
           isRecurring,
           notes: holidayNotes.trim() || 'Declared Official Holiday',
           createdAt: new Date().toISOString()
-        });
+        };
+        newHolidays.push(holObj);
+        syncRecordToSupabase('admin_holidays', holObj);
       }
       current.setDate(current.getDate() + 1);
       dayCount++;
@@ -274,6 +443,7 @@ export default function AdminOperationsDashboard({
     setAdminHolidays(updated);
     localStorage.setItem('dpi_admin_holidays', JSON.stringify(updated));
     setSelectedHolidayIds(prev => prev.filter(i => i !== id));
+    deleteRecordFromSupabase('admin_holidays', id);
     showToast('Holiday entry deleted', 'info');
   };
 
@@ -282,6 +452,7 @@ export default function AdminOperationsDashboard({
     const updated = adminHolidays.filter(h => !selectedHolidayIds.includes(h.id));
     setAdminHolidays(updated);
     localStorage.setItem('dpi_admin_holidays', JSON.stringify(updated));
+    selectedHolidayIds.forEach(id => deleteRecordFromSupabase('admin_holidays', id));
     showToast(`Deleted ${selectedHolidayIds.length} selected holiday(s)`, 'info');
     setSelectedHolidayIds([]);
   };
@@ -336,73 +507,56 @@ export default function AdminOperationsDashboard({
 
   return (
     <div className="space-y-6 animate-fadeIn pb-24 sm:pb-12">
-      {/* Toast Notification */}
-      {notification && (
-        <div className={`fixed top-16 right-4 z-50 px-4 py-2.5 rounded-2xl shadow-xl border text-xs font-bold flex items-center gap-2 animate-in fade-in slide-in-from-top-2 ${
-          notification.type === 'error' ? 'bg-rose-950 text-rose-200 border-rose-800' :
-          notification.type === 'info' ? 'bg-blue-950 text-blue-200 border-blue-800' :
-          'bg-emerald-950 text-emerald-200 border-emerald-800'
-        }`}>
-          <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400" />
-          <span>{notification.msg}</span>
-        </div>
-      )}
+      {/* Upgraded Glassmorphic Toast Notification Stacking Queue */}
+      <Toast toasts={toasts} onDismiss={handleDismissToast} />
 
       {/* 1. Header & Quick Stat Cards */}
       <div className="bg-white border border-slate-200/90 rounded-3xl p-4 sm:p-5 shadow-xs space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div>
-            <div className="flex items-center gap-2 flex-wrap">
-              <h2 className="text-base font-extrabold text-slate-900 tracking-tight">Admin &amp; Business Operations Portal</h2>
-              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[9px] font-extrabold bg-blue-50 text-blue-700 border border-blue-200 uppercase tracking-wider">
-                <ShieldCheck className="h-3 w-3 text-blue-600" /> Admin Exclusive
-              </span>
-            </div>
-            <p className="text-xs text-slate-500 font-medium mt-0.5">
-              Direct administrative entries for leaves, On Duty (OD) field work, punch corrections &amp; company calendar
-            </p>
+            <h2 className="text-base font-extrabold text-slate-900 tracking-tight">Admin &amp; Business Operations Portal</h2>
           </div>
         </div>
 
         {/* Executive Quick Stats */}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 sm:gap-3 pt-1">
-          <div className="bg-slate-50 border border-slate-200/80 rounded-2xl p-3 sm:p-3.5 flex items-center justify-between">
+          <div className="group bg-slate-50 border border-slate-200/80 rounded-2xl p-3 sm:p-4 hover:bg-white hover:shadow-xs hover:-translate-y-0.5 transition-all duration-200 ease-out flex items-center justify-between">
             <div>
-              <span className="text-[9px] sm:text-[10px] font-extrabold text-slate-400 uppercase tracking-wider block">On Leave Today</span>
-              <span className="text-lg sm:text-xl font-extrabold text-slate-900 font-mono">{activeLeavesToday}</span>
+              <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest block">On Leave Today</span>
+              <span className="text-lg sm:text-2xl font-black text-slate-900 font-mono tracking-tight mt-0.5 block">{activeLeavesToday}</span>
             </div>
-            <div className="h-8 w-8 rounded-xl bg-amber-50 text-amber-600 border border-amber-200/80 flex items-center justify-center font-bold">
-              <Palmtree className="h-4 w-4" />
+            <div className="h-9 w-9 rounded-xl bg-[#eeedfa] text-[#3b3492] border border-[#c7c4f0] flex items-center justify-center font-bold shadow-2xs group-hover:scale-110 group-hover:rotate-3 transition-transform duration-200">
+              <Palmtree className="h-4.5 w-4.5" />
             </div>
           </div>
 
-          <div className="bg-slate-50 border border-slate-200/80 rounded-2xl p-3 sm:p-3.5 flex items-center justify-between">
+          <div className="group bg-slate-50 border border-slate-200/80 rounded-2xl p-3 sm:p-4 hover:bg-white hover:shadow-xs hover:-translate-y-0.5 transition-all duration-200 ease-out flex items-center justify-between">
             <div>
-              <span className="text-[9px] sm:text-[10px] font-extrabold text-slate-400 uppercase tracking-wider block">On Duty (OD) Today</span>
-              <span className="text-lg sm:text-xl font-extrabold text-slate-900 font-mono">{activeODsToday}</span>
+              <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest block">On Duty (OD) Today</span>
+              <span className="text-lg sm:text-2xl font-black text-slate-900 font-mono tracking-tight mt-0.5 block">{activeODsToday}</span>
             </div>
-            <div className="h-8 w-8 rounded-xl bg-blue-50 text-blue-600 border border-blue-200/80 flex items-center justify-center font-bold">
-              <Briefcase className="h-4 w-4" />
+            <div className="h-9 w-9 rounded-xl bg-[#f0f9ff] text-[#0369a1] border border-[#bae6fd] flex items-center justify-center font-bold shadow-2xs group-hover:scale-110 group-hover:rotate-3 transition-transform duration-200">
+              <Briefcase className="h-4.5 w-4.5" />
             </div>
           </div>
 
-          <div className="bg-slate-50 border border-slate-200/80 rounded-2xl p-3 sm:p-3.5 flex items-center justify-between">
+          <div className="group bg-slate-50 border border-slate-200/80 rounded-2xl p-3 sm:p-4 hover:bg-white hover:shadow-xs hover:-translate-y-0.5 transition-all duration-200 ease-out flex items-center justify-between">
             <div>
-              <span className="text-[9px] sm:text-[10px] font-extrabold text-slate-400 uppercase tracking-wider block">Manual Punches</span>
-              <span className="text-lg sm:text-xl font-extrabold text-slate-900 font-mono">{manualPunches.length}</span>
+              <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest block">Manual Punches</span>
+              <span className="text-lg sm:text-2xl font-black text-slate-900 font-mono tracking-tight mt-0.5 block">{manualPunches.length}</span>
             </div>
-            <div className="h-8 w-8 rounded-xl bg-purple-50 text-purple-600 border border-purple-200/80 flex items-center justify-center font-bold">
-              <Wrench className="h-4 w-4" />
+            <div className="h-9 w-9 rounded-xl bg-slate-100 text-slate-700 border border-slate-200 flex items-center justify-center font-bold shadow-2xs group-hover:scale-110 group-hover:rotate-3 transition-transform duration-200">
+              <Wrench className="h-4.5 w-4.5" />
             </div>
           </div>
 
-          <div className="bg-slate-50 border border-slate-200/80 rounded-2xl p-3 sm:p-3.5 flex items-center justify-between">
+          <div className="group bg-slate-50 border border-slate-200/80 rounded-2xl p-3 sm:p-4 hover:bg-white hover:shadow-xs hover:-translate-y-0.5 transition-all duration-200 ease-out flex items-center justify-between">
             <div>
-              <span className="text-[9px] sm:text-[10px] font-extrabold text-slate-400 uppercase tracking-wider block">Upcoming Holidays</span>
-              <span className="text-lg sm:text-xl font-extrabold text-slate-900 font-mono">{upcomingHolidaysCount}</span>
+              <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest block">Upcoming Holidays</span>
+              <span className="text-lg sm:text-2xl font-black text-slate-900 font-mono tracking-tight mt-0.5 block">{upcomingHolidaysCount}</span>
             </div>
-            <div className="h-8 w-8 rounded-xl bg-emerald-50 text-emerald-600 border border-emerald-200/80 flex items-center justify-center font-bold">
-              <Calendar className="h-4 w-4" />
+            <div className="h-9 w-9 rounded-xl bg-[#eaf7ed] text-[#15803d] border border-[#bbf7d0] flex items-center justify-center font-bold shadow-2xs group-hover:scale-110 group-hover:rotate-3 transition-transform duration-200">
+              <Calendar className="h-4.5 w-4.5" />
             </div>
           </div>
         </div>
@@ -414,7 +568,8 @@ export default function AdminOperationsDashboard({
           { id: 'leaves', label: 'Leave Manager', shortLabel: 'Leaves', icon: Calendar, badge: adminLeaves.length },
           { id: 'od', label: 'On Duty (OD) Register', shortLabel: 'On Duty (OD)', icon: Briefcase, badge: adminODs.length },
           { id: 'regularization', label: 'Punch Regularization', shortLabel: 'Punch Corrections', icon: Clock, badge: manualPunches.length },
-          { id: 'holidays', label: 'Holiday Calendar', shortLabel: 'Holidays', icon: Building2, badge: adminHolidays.length }
+          { id: 'holidays', label: 'Holiday Calendar', shortLabel: 'Holidays', icon: Building2, badge: adminHolidays.length },
+          { id: 'shifts', label: 'Shift Timings', shortLabel: 'Shifts', icon: Sliders, badge: shiftSchedules.length }
         ].map(tab => {
           const Icon = tab.icon;
           const isActive = activeSubTab === tab.id;
@@ -424,14 +579,14 @@ export default function AdminOperationsDashboard({
               onClick={() => setActiveSubTab(tab.id)}
               className={`snap-start shrink-0 min-w-[130px] sm:min-w-0 sm:flex-1 py-2.5 px-3 rounded-xl text-xs font-extrabold transition-all flex items-center justify-center gap-1.5 sm:gap-2 cursor-pointer ${
                 isActive
-                  ? 'bg-white text-blue-700 shadow-2xs border border-slate-200/80'
-                  : 'text-slate-500 hover:text-slate-900'
+                  ? 'bg-slate-900 text-white shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-white border border-transparent hover:border-slate-200'
               }`}
             >
               <Icon className="h-4 w-4 shrink-0" />
               <span className="hidden md:inline">{tab.label}</span>
               <span className="inline md:hidden">{tab.shortLabel}</span>
-              <span className={`px-1.5 py-0.2 rounded-full text-[9px] font-mono ${isActive ? 'bg-blue-100 text-blue-800' : 'bg-slate-200 text-slate-600'}`}>
+              <span className={`px-1.5 py-0.2 rounded-md text-[9px] font-mono font-extrabold ${isActive ? 'bg-slate-800 text-blue-300' : 'bg-slate-200 text-slate-700'}`}>
                 {tab.badge}
               </span>
             </button>
@@ -863,7 +1018,40 @@ export default function AdminOperationsDashboard({
 
       {/* SECTION C: PUNCH REGULARIZATION */}
       {activeSubTab === 'regularization' && (
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+        <div className="space-y-6 animate-fadeIn">
+          {/* 1-Click Batch Regularization Assistant Card */}
+          {unresolvedMissingOuts.length > 0 && (
+            <div className="bg-gradient-to-r from-amber-500/10 via-purple-500/10 to-blue-500/10 border border-amber-300/80 rounded-3xl p-5 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div className="flex items-start gap-3">
+                <div className="h-10 w-10 rounded-2xl bg-amber-500 text-white flex items-center justify-center font-bold shrink-0 shadow-2xs">
+                  <Zap className="h-5 w-5 animate-pulse" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h4 className="text-xs font-extrabold text-slate-900 uppercase tracking-wider">
+                      Batch Regularization Assistant
+                    </h4>
+                    <span className="bg-amber-100 text-amber-800 text-[10px] font-mono font-extrabold px-2 py-0.5 rounded-full">
+                      {unresolvedMissingOuts.length} Unresolved
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-600 font-medium mt-1">
+                    Found <span className="font-bold text-slate-900">{unresolvedMissingOuts.length} worker(s)</span> with missing OUT punches. Automatically generate shift-end OUT punches (18:00) with 1 click.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={handleBatchRegularize}
+                className="px-4 py-2.5 bg-slate-900 hover:bg-slate-800 text-white text-xs font-extrabold rounded-xl shadow-xs transition-all cursor-pointer shrink-0 flex items-center justify-center gap-2"
+              >
+                <CheckCircle2 className="h-4 w-4 text-emerald-400" />
+                Auto-Regularize All ({unresolvedMissingOuts.length}) to 18:00
+              </button>
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
           {/* Left Form: Insert Punch (5 cols) */}
           <div className="lg:col-span-5 bg-white border border-slate-200/90 rounded-3xl p-4 sm:p-5 shadow-xs space-y-4">
             <div className="border-b border-slate-100 pb-3">
@@ -986,7 +1174,7 @@ export default function AdminOperationsDashboard({
                       <span className="font-bold text-slate-800 text-[10px]">{item.dateStr} at {item.timeStr}</span>
                     </div>
 
-                    <p className="text-[10px] text-slate-500 italic">"{item.reason}"</p>
+                    <p className="text-[10px] text-slate-500 italic">{item.reason}</p>
                   </div>
                 ))
               ) : (
@@ -1056,6 +1244,7 @@ export default function AdminOperationsDashboard({
             </div>
           </div>
         </div>
+      </div>
       )}
 
       {/* SECTION D: HOLIDAY CALENDAR */}
@@ -1667,6 +1856,235 @@ export default function AdminOperationsDashboard({
             </div>
           );
         })())}
+
+      {/* SECTION E: SHIFT TIMINGS & ROSTER MANAGER */}
+      {activeSubTab === 'shifts' && (
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 animate-fadeIn">
+          {/* Left Form: Configure Shift (5 cols) */}
+          <div className="lg:col-span-5 bg-white border border-slate-200/90 rounded-3xl p-4 sm:p-5 shadow-xs space-y-4">
+            <div className="border-b border-slate-100 pb-3">
+              <h3 className="text-xs font-extrabold text-slate-900 uppercase tracking-wider flex items-center gap-2">
+                <Sliders className="h-4 w-4 text-blue-600" />
+                Configure Shift Timing &amp; Roster
+              </h3>
+              <p className="text-[10px] text-slate-400 font-medium mt-0.5">
+                Set shift start/end times &amp; grace period by Department, Designation, or Employee
+              </p>
+            </div>
+
+            <form onSubmit={handleAssignShift} className="space-y-3.5">
+              {/* Scope Selector: Dept / Designation / Employee */}
+              <div>
+                <label className="text-[10px] font-extrabold text-slate-600 uppercase tracking-wider block mb-1">
+                  1. Scope Type
+                </label>
+                <div className="grid grid-cols-3 gap-1 bg-slate-100 p-1 rounded-xl border border-slate-200">
+                  {['Department', 'Designation', 'Employee'].map(type => (
+                    <button
+                      key={type}
+                      type="button"
+                      onClick={() => {
+                        setShiftScopeType(type);
+                        if (type === 'Department') setShiftTarget(availableDepartments[0] || 'Production');
+                        else if (type === 'Designation') setShiftTarget(availableDesignations[0] || 'Operator');
+                        else setShiftTarget(Object.keys(employees)[0] || '');
+                      }}
+                      className={`text-[10px] font-extrabold py-1.5 rounded-lg transition-all cursor-pointer ${
+                        shiftScopeType === type ? 'bg-white text-slate-900 shadow-2xs font-extrabold' : 'text-slate-500 hover:text-slate-800'
+                      }`}
+                    >
+                      {type}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Target Selection Dropdown */}
+              <div>
+                <label className="text-[10px] font-extrabold text-slate-600 uppercase tracking-wider block mb-1">
+                  2. Select Target {shiftScopeType}
+                </label>
+                {shiftScopeType === 'Department' && (
+                  <CustomDropdown
+                    options={availableDepartments.map(d => ({ value: d, label: d }))}
+                    value={shiftTarget}
+                    onChange={setShiftTarget}
+                  />
+                )}
+                {shiftScopeType === 'Designation' && (
+                  <CustomDropdown
+                    options={availableDesignations.map(d => ({ value: d, label: d }))}
+                    value={shiftTarget}
+                    onChange={setShiftTarget}
+                  />
+                )}
+                {shiftScopeType === 'Employee' && (
+                  <CustomDropdown
+                    options={employeeOptions}
+                    value={shiftTarget}
+                    onChange={setShiftTarget}
+                    placeholder="-- Select Employee --"
+                  />
+                )}
+              </div>
+
+              {/* Shift Presets */}
+              <div>
+                <label className="text-[10px] font-extrabold text-slate-600 uppercase tracking-wider block mb-1">
+                  3. Shift Preset
+                </label>
+                <CustomDropdown
+                  options={[
+                    { value: 'General Day Shift (09:00 - 18:00)', label: '☀️ General Day Shift (09:00 AM – 06:00 PM)' },
+                    { value: 'Morning Shift (06:00 - 14:30)', label: '🌅 Morning Shift (06:00 AM – 02:30 PM)' },
+                    { value: 'Evening Shift (14:00 - 22:30)', label: '🌆 Evening Shift (02:00 PM – 10:30 PM)' },
+                    { value: 'Night Shift (22:00 - 06:30)', label: '🌙 Night Shift (10:00 PM – 06:30 AM)' },
+                    { value: 'Custom Shift', label: '⚙️ Custom Timing' }
+                  ]}
+                  value={shiftPreset}
+                  onChange={(val) => {
+                    setShiftPreset(val);
+                    if (val.includes('09:00 - 18:00')) { setShiftStartTime('09:00'); setShiftEndTime('18:00'); }
+                    else if (val.includes('06:00 - 14:30')) { setShiftStartTime('06:00'); setShiftEndTime('14:30'); }
+                    else if (val.includes('14:00 - 22:30')) { setShiftStartTime('14:00'); setShiftEndTime('22:30'); }
+                    else if (val.includes('22:00 - 06:30')) { setShiftStartTime('22:00'); setShiftEndTime('06:30'); }
+                  }}
+                />
+              </div>
+
+              {/* Start Time, End Time & Grace Period */}
+              <div className="grid grid-cols-3 gap-2.5">
+                <div>
+                  <label className="text-[10px] font-extrabold text-slate-600 uppercase tracking-wider block mb-1">Start Time</label>
+                  <input
+                    type="time"
+                    value={shiftStartTime}
+                    onChange={(e) => setShiftStartTime(e.target.value)}
+                    className="w-full bg-slate-50 border border-slate-200 text-xs font-bold text-slate-800 rounded-xl px-2.5 py-2 outline-none focus:bg-white focus:border-blue-500 transition-all font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] font-extrabold text-slate-600 uppercase tracking-wider block mb-1">End Time</label>
+                  <input
+                    type="time"
+                    value={shiftEndTime}
+                    onChange={(e) => setShiftEndTime(e.target.value)}
+                    className="w-full bg-slate-50 border border-slate-200 text-xs font-bold text-slate-800 rounded-xl px-2.5 py-2 outline-none focus:bg-white focus:border-blue-500 transition-all font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] font-extrabold text-slate-600 uppercase tracking-wider block mb-1">Grace (Mins)</label>
+                  <input
+                    type="number"
+                    min="0"
+                    max="60"
+                    value={shiftGraceMinutes}
+                    onChange={(e) => setShiftGraceMinutes(e.target.value)}
+                    className="w-full bg-slate-50 border border-slate-200 text-xs font-bold text-slate-800 rounded-xl px-2.5 py-2 outline-none focus:bg-white focus:border-blue-500 transition-all font-mono"
+                  />
+                </div>
+              </div>
+
+              {/* Date Scope */}
+              <div className="grid grid-cols-2 gap-2.5">
+                <div>
+                  <label className="text-[10px] font-extrabold text-slate-600 uppercase tracking-wider block mb-1">Effective Start</label>
+                  <input
+                    type="date"
+                    value={shiftStartDate}
+                    onChange={(e) => setShiftStartDate(e.target.value)}
+                    className="w-full bg-slate-50 border border-slate-200 text-xs font-bold text-slate-800 rounded-xl px-3 py-2 outline-none focus:bg-white focus:border-blue-500 transition-all"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] font-extrabold text-slate-600 uppercase tracking-wider block mb-1">Effective End</label>
+                  <input
+                    type="date"
+                    value={shiftEndDate}
+                    onChange={(e) => setShiftEndDate(e.target.value)}
+                    className="w-full bg-slate-50 border border-slate-200 text-xs font-bold text-slate-800 rounded-xl px-3 py-2 outline-none focus:bg-white focus:border-blue-500 transition-all"
+                  />
+                </div>
+              </div>
+
+              <button
+                type="submit"
+                className="w-full py-3 sm:py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-extrabold text-xs rounded-xl shadow-xs transition-all cursor-pointer flex items-center justify-center gap-1.5"
+              >
+                <Check className="h-4 w-4" /> Save &amp; Apply Shift Schedule
+              </button>
+            </form>
+          </div>
+
+          {/* Right Table: Active Shift Roster (7 cols) */}
+          <div className="lg:col-span-7 bg-white border border-slate-200/90 rounded-3xl p-4 sm:p-5 shadow-xs space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div>
+                <h3 className="text-xs font-extrabold text-slate-900 uppercase tracking-wider flex items-center gap-2">
+                  <Sliders className="h-4 w-4 text-blue-600" />
+                  Active Shift Schedule Roster
+                </h3>
+                <p className="text-[10px] text-slate-400 font-medium mt-0.5">Showing {shiftSchedules.length} assigned shift rules</p>
+              </div>
+            </div>
+
+            <div className="border border-slate-200/80 rounded-2xl overflow-hidden">
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs border-collapse">
+                  <thead className="bg-slate-50 text-[10px] font-extrabold text-slate-400 uppercase tracking-wider border-b border-slate-200">
+                    <tr>
+                      <th className="px-3 py-2.5">Scope &amp; Target</th>
+                      <th className="px-3 py-2.5">Shift Name &amp; Timing</th>
+                      <th className="px-3 py-2.5">Grace &amp; Validity</th>
+                      <th className="px-3 py-2.5 text-right">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-150 text-slate-700">
+                    {shiftSchedules.length > 0 ? (
+                      shiftSchedules.map((item) => (
+                        <tr key={item.id} className="hover:bg-slate-50/80 transition-colors">
+                          <td className="px-3 py-2.5">
+                            <span className="font-extrabold text-slate-900 block text-xs">{item.targetName}</span>
+                            <span className="text-[9px] font-mono font-bold text-blue-600 bg-blue-50 border border-blue-200 px-1.5 py-0.2 rounded uppercase">
+                              {item.scopeType}
+                            </span>
+                          </td>
+                          <td className="px-3 py-2.5">
+                            <span className="font-bold text-slate-800 block text-xs">{item.shiftName}</span>
+                            <span className="text-[10px] font-mono font-extrabold text-slate-600 bg-slate-100 border border-slate-200 px-1.5 py-0.2 rounded inline-block mt-0.5">
+                              {item.startTime} – {item.endTime}
+                            </span>
+                          </td>
+                          <td className="px-3 py-2.5 font-mono">
+                            <span className="text-[10px] font-bold text-slate-800 block">Grace: {item.graceMinutes} mins</span>
+                            <span className="text-[9px] text-slate-400">{item.startDate} to {item.endDate}</span>
+                          </td>
+                          <td className="px-3 py-2.5 text-right">
+                            <button
+                              onClick={() => handleRevokeShift(item.id)}
+                              className="p-1.5 text-rose-600 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
+                              title="Revoke Shift Rule"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          </td>
+                        </tr>
+                      ))
+                    ) : (
+                      <tr>
+                        <td colSpan={4} className="px-3 py-8 text-center text-slate-400 text-xs font-medium">
+                          No shift schedules configured yet.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
+
