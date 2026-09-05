@@ -5,16 +5,28 @@
   "description": "eSSL Biometric Attendance Radar and Workforce Management System",
   "icons": [
     {
-      "src": "/dpi-transparent.png",
+      "src": "/dpi.png",
       "type": "image/png",
       "sizes": "192x192",
-      "purpose": "any maskable"
+      "purpose": "any"
     },
     {
-      "src": "/dpi-transparent.png",
+      "src": "/dpi.png",
       "type": "image/png",
       "sizes": "512x512",
-      "purpose": "any maskable"
+      "purpose": "any"
+    },
+    {
+      "src": "/dpi.png",
+      "type": "image/png",
+      "sizes": "192x192",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/dpi.png",
+      "type": "image/png",
+      "sizes": "512x512",
+      "purpose": "maskable"
     },
     {
       "src": "/dpi-transparent.png",
