@@ -13,6 +13,8 @@ import {
   X
 } from 'lucide-react';
 
+import { useTranslation } from '@/hooks/useTranslation';
+
 function DesktopSidebar({
   isSupabaseMode,
   currentTime,
@@ -26,6 +28,7 @@ function DesktopSidebar({
   isCollapsed,
   setIsCollapsed
 }) {
+  const { t } = useTranslation();
   const [liveTime, setLiveTime] = useState(() => currentTime || new Date());
   const searchInputRef = useRef(null);
 
@@ -35,12 +38,12 @@ function DesktopSidebar({
   }, []);
 
   const tabs = useMemo(() => [
-    { id: 'analytics', label: 'Analytics', icon: BarChart3, badge: 'Insights' },
-    { id: 'logs', label: 'Punch Logs', icon: Clock, badge: 'Live' },
-    { id: 'presence', label: 'Directory', icon: Users, badge: 'Roster' },
-    { id: 'admin', label: 'Admin Ops', icon: ShieldCheck, badge: 'Ops' },
-    { id: 'export', label: 'Reports', icon: FileText, badge: 'Exports' }
-  ], []);
+    { id: 'analytics', label: t('analytics'), icon: BarChart3, badge: 'Insights' },
+    { id: 'logs', label: t('logs'), icon: Clock, badge: 'Live' },
+    { id: 'presence', label: t('directory'), icon: Users, badge: 'Roster' },
+    { id: 'admin', label: t('admin'), icon: ShieldCheck, badge: 'Ops' },
+    { id: 'export', label: t('reports'), icon: FileText, badge: 'Exports' }
+  ], [t]);
 
   return (
     <aside
@@ -220,7 +223,7 @@ function DesktopSidebar({
             } ${isCollapsed ? 'justify-center px-0' : ''}`}
           >
             <Settings className={`h-4 w-4 shrink-0 ${activeTab === 'settings' ? 'rotate-45' : ''}`} />
-            {!isCollapsed && <span>Settings</span>}
+            {!isCollapsed && <span>{t('settings')}</span>}
           </button>
           {isCollapsed && (
             <div className="absolute left-full top-1/2 -translate-y-1/2 ml-3 px-2.5 py-1 bg-slate-900 text-white text-xs font-bold rounded-lg shadow-xl border border-slate-800 pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity duration-200 whitespace-nowrap z-50">

@@ -21,6 +21,7 @@ import { useAttendanceData } from '@/hooks/useAttendanceData';
 import { useAdminOperations } from '@/hooks/useAdminOperations';
 import { usePresenceDirectory } from '@/hooks/usePresenceDirectory';
 import { useExportHub } from '@/hooks/useExportHub';
+import { useTranslation } from '@/hooks/useTranslation';
 
 import LoginView from '@/components/auth/LoginView';
 import SplashLoader from '@/components/auth/SplashLoader';
@@ -47,6 +48,7 @@ const ModuleLoader = () => (
 );
 
 export default function App() {
+  const { t } = useTranslation();
   // Attendance Data Custom Hook
   const {
     employees,
@@ -1210,12 +1212,12 @@ export default function App() {
           <nav className="lg:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-md border-t border-slate-200/80 shadow-[0_-4px_24px_rgba(0,0,0,0.06)]">
             <div className="flex items-stretch h-[72px] px-2">
               {[
-                { id: 'logs', label: 'Logs', icon: Clock },
-                { id: 'presence', label: 'Directory', icon: Users },
-                { id: 'analytics', label: 'Analytics', icon: BarChart3 },
-                { id: 'admin', label: 'Admin', icon: ShieldCheck },
-                { id: 'export', label: 'Reports', icon: FileText },
-                { id: 'settings', label: 'Settings', icon: Settings }
+                { id: 'logs', label: t('logs'), icon: Clock },
+                { id: 'presence', label: t('directory'), icon: Users },
+                { id: 'analytics', label: t('analytics'), icon: BarChart3 },
+                { id: 'admin', label: t('admin'), icon: ShieldCheck },
+                { id: 'export', label: t('reports'), icon: FileText },
+                { id: 'settings', label: t('settings'), icon: Settings }
               ].map((tab) => {
                 const Icon = tab.icon;
                 const isActive = activeTab === tab.id;

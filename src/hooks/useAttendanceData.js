@@ -37,73 +37,118 @@ export function useAttendanceData() {
       const { data: deviceData } = await supabase.from('employee_devices').select('*');
       const { data: empData } = await supabase.from('employees').select('*');
 
-      const employeeMap = {};
+      // Robust deletion check
+      const isDeletedRecord = (emp) => {
+        if (!emp) return true;
+        const name = String(emp.name || emp.EmployeeName || '').toLowerCase().trim();
+        const company = String(emp.company_name || emp.Company || '').toLowerCase().trim();
+        const status = String(emp.status || emp.Status || '').toLowerCase().trim();
 
-      // Process primary employee_devices table
+        if (company === 'x' || company === 'deleted' || company === 'del') return true;
+        if (status === 'deleted' || status === 'x') return true;
+        if (name.startsWith('del')) return true;
+        if (name.includes('deleted')) return true;
+        return false;
+      };
+
+      // Collect normalized names of deleted employees to cross-filter employee_devices legacy records
+      const deletedNamesSet = new Set();
+      if (empData) {
+        empData.forEach(e => {
+          if (isDeletedRecord(e)) {
+            const cleanName = String(e.name || '').replace(/^del[_\s-]*|\bdeleted\b/i, '').toLowerCase().trim();
+            if (cleanName) deletedNamesSet.add(cleanName);
+          }
+        });
+      }
+
+      // Map device metadata by normalized name and device code
+      const deviceByName = {};
+      const deviceByCode = {};
       if (deviceData && deviceData.length > 0) {
+        deviceData.forEach(d => {
+          const normName = String(d.EmployeeName || '').toLowerCase().trim();
+          if (isDeletedRecord(d) || deletedNamesSet.has(normName)) return;
+
+          if (normName) deviceByName[normName] = d;
+          if (d.EmployeeCode) {
+            const codeStr = String(d.EmployeeCode);
+            const codePadded = codeStr.padStart(4, '0');
+            deviceByCode[codeStr] = d;
+            deviceByCode[codePadded] = d;
+          }
+        });
+      }
+
+      const employeeMap = {};
+      const codeToIdLookup = {};
+
+      // Primary source: base employees table (matches biometric_logs.employee_id)
+      if (empData && empData.length > 0) {
+        empData.forEach(emp => {
+          if (isDeletedRecord(emp)) return;
+
+          const empId = String(emp.id);
+          const paddedId = empId.padStart(4, '0');
+          const normName = String(emp.name || '').toLowerCase().trim();
+
+          const deviceMatch = deviceByName[normName] || deviceByCode[paddedId] || deviceByCode[empId] || {};
+
+          const cleanSubDept = (!deviceMatch.SubDepartment || deviceMatch.SubDepartment === 'null') ? 'N/A' : deviceMatch.SubDepartment;
+          const cleanDOJ = (!deviceMatch.DOJ || deviceMatch.DOJ.startsWith('1900')) ? 'N/A' : deviceMatch.DOJ.slice(0, 10);
+          const cleanDOC = (!deviceMatch.DOC || deviceMatch.DOC.startsWith('1900')) ? 'N/A' : deviceMatch.DOC.slice(0, 10);
+
+          const record = {
+            id: empId,
+            name: emp.name || deviceMatch.EmployeeName || `Employee ${empId}`,
+            department: emp.department || deviceMatch.Department || 'General',
+            subDepartment: cleanSubDept,
+            designation: deviceMatch.Designation || 'Staff',
+            role: emp.role || deviceMatch.Designation || 'Staff Member',
+            company: 'DPI',
+            employmentType: deviceMatch.EmploymentType || 'Permanent',
+            gender: (!deviceMatch.Gender || deviceMatch.Gender === 'null') ? 'N/A' : deviceMatch.Gender,
+            status: deviceMatch.Status || 'Working',
+            doj: cleanDOJ,
+            doc: cleanDOC,
+            verificationType: deviceMatch.VerificationType || 'Biometric',
+            avatar: emp.avatar || `https://i.pravatar.cc/150?u=${empId}`
+          };
+
+          employeeMap[empId] = record;
+
+          // Register lookup aliases for log matching
+          codeToIdLookup[empId] = empId;
+          codeToIdLookup[paddedId] = empId;
+          if (deviceMatch.EmployeeCode) {
+            const dCode = String(deviceMatch.EmployeeCode);
+            codeToIdLookup[dCode] = empId;
+            codeToIdLookup[dCode.padStart(4, '0')] = empId;
+          }
+        });
+      } else if (deviceData && deviceData.length > 0) {
+        // Fallback if base employees table is unavailable
         deviceData.forEach(emp => {
-          if (emp.Company === 'X' || (emp.EmployeeName && emp.EmployeeName.startsWith('del_'))) return;
-
+          if (isDeletedRecord(emp)) return;
           const empId = String(emp.EmployeeCode || emp.id).padStart(4, '0');
-          const rawCode = String(emp.EmployeeCode || emp.id);
-
-          const cleanSubDept = (!emp.SubDepartment || emp.SubDepartment === 'null') ? 'N/A' : emp.SubDepartment;
-          const cleanDOJ = (!emp.DOJ || emp.DOJ.startsWith('1900')) ? 'N/A' : emp.DOJ.slice(0, 10);
-          const cleanDOC = (!emp.DOC || emp.DOC.startsWith('1900')) ? 'N/A' : emp.DOC.slice(0, 10);
-
           const record = {
             id: empId,
             name: emp.EmployeeName || `Employee ${empId}`,
             department: emp.Department || 'General',
-            subDepartment: cleanSubDept,
+            subDepartment: (!emp.SubDepartment || emp.SubDepartment === 'null') ? 'N/A' : emp.SubDepartment,
             designation: emp.Designation || 'Staff',
             role: emp.Designation || 'Staff Member',
             company: emp.Company || 'DPI',
             employmentType: emp.EmploymentType || 'Permanent',
             gender: (!emp.Gender || emp.Gender === 'null') ? 'N/A' : emp.Gender,
             status: emp.Status || 'Working',
-            doj: cleanDOJ,
-            doc: cleanDOC,
+            doj: (!emp.DOJ || emp.DOJ.startsWith('1900')) ? 'N/A' : emp.DOJ.slice(0, 10),
+            doc: (!emp.DOC || emp.DOC.startsWith('1900')) ? 'N/A' : emp.DOC.slice(0, 10),
             verificationType: emp.VerificationType || 'Biometric',
             avatar: `https://i.pravatar.cc/150?u=${empId}`
           };
-
           employeeMap[empId] = record;
-          if (rawCode !== empId) {
-            employeeMap[rawCode] = record;
-          }
-        });
-      }
-
-      // Fallback to base employees table
-      if (empData && empData.length > 0) {
-        empData.forEach(emp => {
-          if (emp.company_name === 'X' || (emp.name && emp.name.startsWith('del_'))) return;
-          const empId = String(emp.id).padStart(4, '0');
-          const rawId = String(emp.id);
-
-          if (!employeeMap[empId] && !employeeMap[rawId]) {
-            const fallbackRecord = {
-              id: empId,
-              name: emp.name,
-              department: emp.department || 'General',
-              subDepartment: 'N/A',
-              designation: 'Staff',
-              role: emp.role || 'Staff Member',
-              company: 'DPI',
-              employmentType: 'Permanent',
-              gender: 'N/A',
-              status: 'Working',
-              doj: 'N/A',
-              doc: 'N/A',
-              verificationType: 'Biometric',
-              avatar: emp.avatar || `https://i.pravatar.cc/150?u=${empId}`
-            };
-            employeeMap[empId] = fallbackRecord;
-            if (rawId !== empId) {
-              employeeMap[rawId] = fallbackRecord;
-            }
-          }
+          codeToIdLookup[empId] = empId;
         });
       }
 
@@ -121,13 +166,22 @@ export function useAttendanceData() {
 
       if (logsData) {
         const formattedLogs = logsData
-          .filter(log => !employeeMap || employeeMap[log.employee_id])
-          .map(log => ({
-            log_id: `LOG-${log.id}`,
-            employee_id: log.employee_id,
-            timestamp: log.timestamp,
-            direction: log.direction
-          }));
+          .map(log => {
+            const rawId = String(log.employee_id);
+            const paddedId = rawId.padStart(4, '0');
+            const targetId = codeToIdLookup[rawId] || codeToIdLookup[paddedId];
+            const matchedEmp = targetId ? employeeMap[targetId] : null;
+
+            if (!matchedEmp && Object.keys(employeeMap).length > 0) return null;
+
+            return {
+              log_id: `LOG-${log.id}`,
+              employee_id: matchedEmp ? matchedEmp.id : log.employee_id,
+              timestamp: log.timestamp,
+              direction: log.direction
+            };
+          })
+          .filter(Boolean);
         setLogs(formattedLogs);
       }
 
@@ -259,11 +313,14 @@ export function useAttendanceData() {
         'postgres_changes',
         { event: 'INSERT', schema: 'public', table: 'biometric_logs' },
         (payload) => {
-          if (!employees[payload.new.employee_id]) return;
+          const rawId = String(payload.new.employee_id);
+          const paddedId = rawId.padStart(4, '0');
+          const matchedEmp = employees[paddedId] || employees[rawId];
+          if (!matchedEmp && Object.keys(employees).length > 0) return;
 
           const newLog = {
             log_id: `LOG-${payload.new.id}`,
-            employee_id: payload.new.employee_id,
+            employee_id: matchedEmp ? matchedEmp.id : payload.new.employee_id,
             timestamp: payload.new.timestamp,
             direction: payload.new.direction
           };

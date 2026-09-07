@@ -17,9 +17,13 @@ import {
   Server,
   Layers,
   CheckCircle2,
-  AlertTriangle
+  AlertTriangle,
+  Globe,
+  BookOpen
 } from 'lucide-react';
 import PWAInstallPrompt from '@/components/pwa/PWAInstallPrompt';
+import SystemDocumentationView from '@/components/documentation/SystemDocumentationView';
+import { useTranslation } from '@/hooks/useTranslation';
 
 function SettingsDashboard({
   isSupabaseMode,
@@ -36,6 +40,8 @@ function SettingsDashboard({
   handleLogout,
   showToast
 }) {
+  const { language, setLanguage, t, languages } = useTranslation();
+
   const themeColors = useMemo(() => [
     { id: 'indigo', name: 'DPI Indigo', hex: '#3b3492', bg: 'bg-[#3b3492]' },
     { id: 'emerald', name: 'Emerald Green', hex: '#16a34a', bg: 'bg-[#16a34a]' },
@@ -47,7 +53,7 @@ function SettingsDashboard({
   const handleSavePreferences = (e) => {
     e.preventDefault();
     if (showToast) {
-      showToast('System preferences & PDF branding saved successfully!');
+      showToast(t('prefSaved'));
     }
   };
 
@@ -61,13 +67,13 @@ function SettingsDashboard({
           <div className="space-y-1">
             <div className="flex items-center gap-2 text-xs font-black uppercase tracking-widest text-blue-400">
               <Settings className="h-4 w-4" />
-              <span>System &amp; Application Configuration</span>
+              <span>{t('systemConfig')}</span>
             </div>
             <h2 className="text-xl sm:text-2xl font-extrabold tracking-tight text-white">
-              Control Panel &amp; Preferences
+              {t('controlPanel')}
             </h2>
             <p className="text-xs text-slate-300 max-w-xl leading-relaxed">
-              Manage database realtime synchronization, customize executive PDF report branding, check telemetry connection health, and configure system preferences.
+              Manage database realtime synchronization, system localization language, customize executive PDF report branding, and explore interactive system documentation.
             </p>
           </div>
 
@@ -79,9 +85,50 @@ function SettingsDashboard({
               className="flex items-center gap-2 px-4 py-2.5 rounded-2xl bg-blue-600 hover:bg-blue-500 text-white font-extrabold text-xs transition-all shadow-md cursor-pointer disabled:opacity-50"
             >
               <RefreshCw className={`h-4 w-4 ${isLoadingData ? 'animate-spin' : ''}`} />
-              <span>Sync Realtime Data</span>
+              <span>{t('syncRealtimeData')}</span>
             </button>
           </div>
+        </div>
+      </div>
+
+      {/* 0. System Language / Localization Preference Card */}
+      <div className="bg-white border border-slate-200/90 rounded-3xl p-5 shadow-xs space-y-4">
+        <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+          <div className="flex items-center gap-2.5">
+            <div className="p-2 rounded-xl bg-blue-50 border border-blue-100 text-blue-600">
+              <Globe className="h-4.5 w-4.5" />
+            </div>
+            <div>
+              <h3 className="text-sm font-extrabold text-slate-900">{t('systemLanguage')}</h3>
+              <p className="text-[11px] text-slate-500">Choose system display language (English, Tamil, Hindi)</p>
+            </div>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap gap-3">
+          {languages.map((lang) => {
+            const isSelected = language === lang.code;
+            return (
+              <button
+                key={lang.code}
+                type="button"
+                onClick={() => {
+                  setLanguage(lang.code);
+                  if (showToast) showToast(`Language changed to ${lang.native}`);
+                }}
+                className={`flex items-center gap-2.5 px-4 py-2.5 rounded-2xl border text-xs font-extrabold transition-all cursor-pointer ${
+                  isSelected
+                    ? 'border-blue-600 bg-blue-600 text-white shadow-md shadow-blue-500/20'
+                    : 'border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100 hover:border-slate-300'
+                }`}
+              >
+                <span className="text-base">{lang.flag}</span>
+                <span>{lang.native}</span>
+                <span className="text-[10px] opacity-75 font-mono">({lang.name})</span>
+                {isSelected && <CheckCircle2 className="h-4 w-4 ml-1 text-white shrink-0" />}
+              </button>
+            );
+          })}
         </div>
       </div>
 
@@ -94,7 +141,7 @@ function SettingsDashboard({
                 <Database className="h-4 w-4" />
               </div>
               <div>
-                <h3 className="text-sm font-extrabold text-slate-900">Database &amp; Realtime Sync</h3>
+                <h3 className="text-sm font-extrabold text-slate-900">{t('databaseSync')}</h3>
                 <p className="text-[11px] text-slate-500">Telemetry status and manual synchronization control</p>
               </div>
             </div>
@@ -105,12 +152,12 @@ function SettingsDashboard({
                   <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
                   <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
                 </span>
-                Supabase Connected
+                {t('supabaseConnected')}
               </span>
             ) : (
               <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-50 text-amber-700 text-xs font-extrabold border border-amber-200">
                 <span className="h-2 w-2 rounded-full bg-amber-500"></span>
-                Local Mode
+                {t('localMode')}
               </span>
             )}
           </div>
@@ -118,7 +165,7 @@ function SettingsDashboard({
           <div className="grid grid-cols-2 gap-3 pt-1">
             <div className="bg-slate-50 border border-slate-200/80 rounded-2xl p-3.5 space-y-1">
               <span className="text-[10px] font-black uppercase tracking-wider text-slate-400 flex items-center gap-1">
-                <Layers className="h-3 w-3 text-slate-500" /> Loaded Logs
+                <Layers className="h-3 w-3 text-slate-500" /> {t('loadedLogs')}
               </span>
               <p className="text-lg font-black text-slate-900">{processedLogsCount.toLocaleString('en-IN')}</p>
               <p className="text-[10px] text-slate-500 font-medium">Biometric record entries</p>
@@ -126,7 +173,7 @@ function SettingsDashboard({
 
             <div className="bg-slate-50 border border-slate-200/80 rounded-2xl p-3.5 space-y-1">
               <span className="text-[10px] font-black uppercase tracking-wider text-slate-400 flex items-center gap-1">
-                <Server className="h-3 w-3 text-slate-500" /> Active Roster
+                <Server className="h-3 w-3 text-slate-500" /> {t('activeRoster')}
               </span>
               <p className="text-lg font-black text-slate-900">{employeesCount}</p>
               <p className="text-[10px] text-slate-500 font-medium">Enrolled personnel</p>
@@ -148,7 +195,7 @@ function SettingsDashboard({
               disabled={isLoadingData}
               className="text-blue-600 hover:text-blue-800 font-bold underline cursor-pointer disabled:opacity-50"
             >
-              Force DB Fetch
+              {t('forceDbFetch')}
             </button>
           </div>
         </div>
@@ -161,7 +208,7 @@ function SettingsDashboard({
                 <Palette className="h-4 w-4" />
               </div>
               <div>
-                <h3 className="text-sm font-extrabold text-slate-900">PDF Report &amp; Branding Setup</h3>
+                <h3 className="text-sm font-extrabold text-slate-900">{t('pdfBranding')}</h3>
                 <p className="text-[11px] text-slate-500">Customize generated circulars &amp; executive notices</p>
               </div>
             </div>
@@ -170,7 +217,7 @@ function SettingsDashboard({
           <form onSubmit={handleSavePreferences} className="space-y-4">
             <div>
               <label className="block text-xs font-bold text-slate-700 mb-1.5">
-                Official Company Header Title
+                {t('companyTitle')}
               </label>
               <input
                 type="text"
@@ -183,7 +230,7 @@ function SettingsDashboard({
 
             <div>
               <label className="block text-xs font-bold text-slate-700 mb-1.5">
-                PDF Accent Color Palette
+                {t('pdfColorPalette')}
               </label>
               <div className="flex flex-wrap gap-2.5">
                 {themeColors.map((c) => (
@@ -209,7 +256,7 @@ function SettingsDashboard({
                 type="submit"
                 className="px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-extrabold text-xs transition-all shadow-sm cursor-pointer"
               >
-                Save Preferences
+                {t('savePreferences')}
               </button>
             </div>
           </form>
@@ -223,7 +270,7 @@ function SettingsDashboard({
                 <Smartphone className="h-4 w-4" />
               </div>
               <div>
-                <h3 className="text-sm font-extrabold text-slate-900">App Installation &amp; Diagnostics</h3>
+                <h3 className="text-sm font-extrabold text-slate-900">{t('appInstallation')}</h3>
                 <p className="text-[11px] text-slate-500">Progressive Web App status and timezone</p>
               </div>
             </div>
@@ -245,7 +292,7 @@ function SettingsDashboard({
               <div className="flex items-center gap-2.5">
                 <Clock className="h-4 w-4 text-slate-600" />
                 <div>
-                  <p className="text-xs font-extrabold text-slate-900">Standard Timezone</p>
+                  <p className="text-xs font-extrabold text-slate-900">{t('timezone')}</p>
                   <p className="text-[10px] text-slate-500">Indian Standard Time (IST - UTC+05:30)</p>
                 </div>
               </div>
@@ -264,7 +311,7 @@ function SettingsDashboard({
                 <ShieldCheck className="h-4 w-4" />
               </div>
               <div>
-                <h3 className="text-sm font-extrabold text-slate-900">Logout &amp; Account Security</h3>
+                <h3 className="text-sm font-extrabold text-slate-900">{t('logoutSecurity')}</h3>
                 <p className="text-[11px] text-slate-500">Session termination and access control</p>
               </div>
             </div>
@@ -273,7 +320,7 @@ function SettingsDashboard({
           <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200/80 space-y-3">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-xs font-black text-slate-900">Active Admin Session</p>
+                <p className="text-xs font-black text-slate-900">{t('activeAdminSession')}</p>
                 <p className="text-[10px] text-slate-500">Authenticated via Local / Master Security Key</p>
               </div>
               <span className="px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-[10px] font-extrabold">
@@ -288,14 +335,18 @@ function SettingsDashboard({
                 className="flex items-center gap-2 px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-extrabold text-xs transition-all shadow-sm cursor-pointer"
               >
                 <LogOut className="h-4 w-4" />
-                <span>Logout</span>
+                <span>{t('logout')}</span>
               </button>
             </div>
           </div>
         </div>
       </div>
+
+      {/* Interactive In-App System Documentation & User Manual Section */}
+      <SystemDocumentationView />
     </div>
   );
 }
 
 export default memo(SettingsDashboard);
+
